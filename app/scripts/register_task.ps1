@@ -2,44 +2,51 @@ param(
     [string]$Time = "09:00",
     [switch]$Unregister
 )
-# Register/remove Windows scheduled task: run main.py daily at $Time
-# Features: wake-to-run + catch-up after missed schedule
+# Register/remove auto-start for DY Spark AutoKeeper.
+# No admin required. Two mechanisms (both user-level):
+#   1) Startup-folder VBS -> fully hidden, runs on every logon with 20s delay,
+#      main.py decides: done -> exit | before send time -> wait | past time -> send now
+#   2) Daily scheduled task at $Time -> scheduled fallback
 # NOTE: keep this file ASCII-only (PowerShell 5.1 reads files as GBK, non-ASCII breaks parsing)
 $ErrorActionPreference = "Stop"
 
 $appDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $condaBase = (& conda info --base | Select-Object -First 1).Trim()
 if (-not $condaBase) { throw "conda not found, run install.bat first" }
-$pythonExe = Join-Path $condaBase "envs\dy_spark\python.exe"
-if (-not (Test-Path $pythonExe)) { throw "env dy_spark not found, run install.bat first" }
+$pythonw = Join-Path $condaBase "envs\dy_spark\pythonw.exe"
+if (-not (Test-Path $pythonw)) { throw "env dy_spark not found, run install.bat first" }
 
 $taskName = "DYSparkAutoKeeper"
+$startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+$startupFile = Join-Path $startupDir "spark_check.lnk"
 
 if ($Unregister) {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-    Write-Host "Task $taskName removed"
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item $startupFile -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $startupDir "spark_check.vbs") -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $startupDir "spark_check.bat") -Force -ErrorAction SilentlyContinue
+    Write-Host "Auto-start removed"
     exit 0
 }
 
-# Action: run main.py with dy_spark python
-$action = New-ScheduledTaskAction -Execute $pythonExe -Argument "`"$appDir\main.py`"" -WorkingDirectory $appDir
+# --- 1) Startup-folder shortcut (runs on every logon, no window) ---
+# Shortcut avoids the WScript.Shell.Run double-quoted-args bug; shell handles quoting.
+$ws = New-Object -ComObject WScript.Shell
+$lnk = $ws.CreateShortcut($startupFile)
+$lnk.TargetPath = $pythonw
+$lnk.Arguments = "`"$appDir\main.py`""
+$lnk.WorkingDirectory = $appDir
+$lnk.WindowStyle = 7
+$lnk.Save()
+Remove-Item (Join-Path $startupDir "spark_check.vbs") -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $startupDir "spark_check.bat") -Force -ErrorAction SilentlyContinue
+Write-Host "OK: startup check installed (shortcut) -> $startupFile"
 
-# Trigger: daily at $Time
+# --- 2) Daily scheduled task (fallback trigger) ---
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$appDir\main.py`"" -WorkingDirectory $appDir
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
-
-# Settings: catch up missed schedule, max runtime 10 min
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
-
-$task = Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
-    -Description "DY Spark AutoKeeper: daily send at $Time" -Force
-
-# Set wake-to-run (PS5.1 cannot set it on New-ScheduledTaskTrigger, set after registration)
-try {
-    $task.Triggers[0].WakeToRun = $true
-    Set-ScheduledTask -InputObject $task | Out-Null
-    Write-Host "OK: registered $taskName (daily $Time, wake-to-run, catch-up)"
-} catch {
-    Write-Host "OK: registered $taskName (daily $Time, catch-up)"
-    Write-Warning "wake-to-run failed (does not affect scheduled trigger): $($_.Exception.Message)"
-}
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 60)
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
+    -Description "DY Spark AutoKeeper: daily send at $Time" -Force | Out-Null
+Write-Host "OK: daily task $taskName registered at $Time"
 Write-Host "Manage: register_task.bat -Time 09:00 | register_task.bat -Unregister"

@@ -84,26 +84,16 @@ def _dump_page_signals(page: Page) -> None:
 
 
 def _find_msg_entry(page: Page):
-    """定位主页'消息'入口：优先导航内文本，其次导航内纯图标（aria/class 候选）。找不到返回 None。"""
+    """定位右上角'消息'入口：全页匹配第一个可见的"消息"文本（就是右上角铃铛入口）。"""
     logger = get_logger()
-    nav = page.locator("header, nav").first
-    if nav.count():
-        target = nav.get_by_text(MSG_TAB_TEXT, exact=True).first
-        if target.count():
-            return target
-        # 入口可能是纯图标（无文字）：只在导航区域内找
-        for sel in ['[aria-label*="消息"]', '[aria-label*="message"]', '[class*="message"]', '[class*="icon"]']:
-            cand = nav.locator(sel).first
-            try:
-                if cand.count() and cand.is_visible():
-                    logger.info(f"消息入口通过导航内图标定位找到：{sel}")
-                    return cand
-            except Exception:  # noqa: BLE001
-                continue
-    # 导航定位失败，退化为全页文本查找
-    target = page.get_by_text(MSG_TAB_TEXT, exact=True).first
-    if target.count():
-        return target
+    els = page.get_by_text(MSG_TAB_TEXT, exact=True)
+    for i in range(min(els.count(), 8)):
+        el = els.nth(i)
+        try:
+            if el.is_visible():
+                return el
+        except Exception:  # noqa: BLE001
+            continue
     return None
 
 
@@ -141,55 +131,55 @@ def _chat_open(page: Page) -> bool:
     return _chat_input(page) is not None
 
 
-def goto_messages(page: Page) -> bool:
-    """进入消息页并等待稳定。返回是否成功停留在消息页。
-    自动点击最多 3 次；每次点击后先验证 URL 是否切换（防点击被吞），
-    失败输出诊断日志后终止（不等待人工干预）。"""
+def _conversation_visible(page: Page, cfg: dict) -> bool:
+    """消息页会话列表是否出现：config 中任一好友文本可见即认为已进入消息页。"""
+    friends = cfg.get("friends") or []
+    for name in friends[:3]:
+        try:
+            els = page.get_by_text(name, exact=False)
+            if els.count():
+                for i in range(min(els.count(), 3)):
+                    if els.nth(i).is_visible():
+                        return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def goto_messages(page: Page, cfg: dict) -> bool:
+    """进入消息页：点击右上角'消息'入口。
+
+    关键策略（卡顿场景）：
+    1. 点击前等待页面完全加载（networkidle + 3 秒缓冲），避免点击太快失效；
+    2. 点击后拉长时间等待消息页渲染（7 秒）；
+    3. 用"会话列表出现（好友文本可见）"验证是否真的进入，失败重试最多 3 次。
+    注意：点击后 URL 可能仍是 /jingxuan（SPA 切换内容不更新 URL），不做 URL 判定。
+    """
     logger = get_logger()
-    page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(1500)  # 等 SPA 挂载
-
-    target = _find_msg_entry(page)
-    if target is None:
-        logger.warning("未找到消息入口（文本和图标候选均无），输出诊断信息")
-        _dump_page_signals(page)
-        return False
-    try:
-        target.wait_for(state="visible", timeout=20000)
-        logger.info("主页已渲染完成，找到消息入口")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"等待消息入口可见超时：{type(e).__name__}")
-
     for attempt in range(1, 4):
-        url_before = page.url
+        page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
+        # 重载首页后等 3 秒（SPA 渲染、事件绑定），不搞长等待
+        page.wait_for_timeout(3000)
+
+        target = _find_msg_entry(page)
+        if target is None:
+            logger.warning(f"第 {attempt} 次：未找到右上角'消息'入口，输出诊断信息")
+            _dump_page_signals(page)
+            continue
         try:
             target.click(timeout=_CLICK_TIMEOUT)
-            logger.info(f"已点击消息导航入口（第 {attempt} 次）")
+            logger.info(f"已点击右上角'消息'入口（第 {attempt} 次）")
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"第 {attempt} 次点击消息入口异常：{type(e).__name__} {str(e)[:150]}")
+            logger.warning(f"第 {attempt} 次点击消息入口异常：{type(e).__name__} {str(e)[:120]}")
 
-        # 点击后 1.5 秒检查：URL 发生变化（路由已切换）或已在消息页 → 视为点击生效；
-        # 仅当 URL 完全没变且不在消息页时，才判定点击被吞并重试。
-        page.wait_for_timeout(1500)
-        url_now = page.url
-        if url_now == url_before and not _in_message_page(page):
-            logger.warning(f"第 {attempt} 次点击后 URL 未变化且不在消息页（仍为 {url_now}），点击可能未生效，重试")
-            continue
-        logger.info(f"[诊断] 点击后 URL 已变化: {url_now}")
-        entered = False
-        for i in range(14):  # 最多 7 秒确认
-            page.wait_for_timeout(500)
-            if _in_message_page(page):
-                if i >= 2:
-                    entered = True
-                    break
-        if entered:
-            logger.info(f"已进入消息页并确认稳定停留（URL: {page.url}）")
+        # 点击消息后等 3 秒（消息页渲染），然后验证会话列表
+        page.wait_for_timeout(3000)
+        if _conversation_visible(page, cfg):
+            logger.info("已进入消息页（会话列表出现）")
             return True
-        logger.warning(f"第 {attempt} 次点击后 URL 已变化但未通过消息页验证，输出诊断信息")
-        _dump_page_signals(page)
+        logger.warning(f"第 {attempt} 次点击后未检测到会话列表，重新加载重试")
 
-    logger.error("自动进入消息页失败（已自动重试 3 次），详见上方 [诊断] 日志")
+    logger.error("进入消息页失败（已重试 3 次，详见上方日志）")
     return False
 
 
@@ -202,9 +192,10 @@ def _open_conversation(page: Page, friend: str, cfg: dict) -> bool:
     # 关键：等待好友文本出现（会话列表异步渲染，可能需数秒），而非即时检查
     item = page.locator(f"text={friend}").first
     try:
-        item.wait_for(state="visible", timeout=25000)
+        # 进入消息页后会话列表已渲染，好友应很快可见；8 秒足够，超时则快速重试
+        item.wait_for(state="visible", timeout=8000)
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"等待会话列表中的 {friend} 出现超时（25s）：{type(e).__name__}")
+        logger.warning(f"等待会话列表中的 {friend} 出现超时（8s）：{type(e).__name__}")
         _dump_page_signals(page)  # 诊断：当前是否真的在消息页、列表长什么样
     else:
         try:
@@ -410,7 +401,7 @@ def send_to_friend(context: BrowserContext, page: Page, friend: str, cfg: dict) 
                     page.wait_for_timeout(2000)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"刷新页面异常（继续重定向）：{type(e).__name__}")
-                goto_messages(page)
+                goto_messages(page, cfg)
                 _rand_delay(cfg)
                 continue
 
