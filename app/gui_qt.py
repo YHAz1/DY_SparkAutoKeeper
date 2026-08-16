@@ -710,16 +710,23 @@ def main():
 
     win = SparkGUI()
     win.show()
-    # 公告只在首次启动显示：看过并同意后记录标记，之后不再弹
+    # 公告每天首次进入显示一次：标记文件记录"今天已看过"，当天不再弹，次日首次进入再弹
     notice_file = os.path.join(APP_DIR, "data", "notice_agreed.txt")
-    if not os.path.exists(notice_file):
+    today = datetime.date.today().isoformat()
+    show_notice = True
+    try:
+        with open(notice_file, encoding="utf-8") as f:
+            show_notice = f.read().strip() != today
+    except Exception:
+        show_notice = True
+    if show_notice:
         dlg = NoticeDialog(win)
         if dlg.exec_() != QDialog.Accepted:
             sys.exit(0)
         try:
             os.makedirs(os.path.dirname(notice_file), exist_ok=True)
             with open(notice_file, "w", encoding="utf-8") as f:
-                f.write("1")
+                f.write(today)
         except Exception:
             pass
     sys.exit(app.exec_())
