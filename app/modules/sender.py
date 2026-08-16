@@ -403,7 +403,13 @@ def send_to_friend(context: BrowserContext, page: Page, friend: str, cfg: dict) 
     for attempt in range(1, retry["max_attempts"] + 1):
         try:
             if not _open_conversation(page, friend, cfg):
-                logger.warning(f"第 {attempt} 次尝试：未能打开 {friend} 的会话，重新进入消息页")
+                # 找不到好友：强制刷新页面（清除状态异常）→ 重新进入消息页 → 再试
+                logger.warning(f"第 {attempt} 次尝试：未找到 {friend}，刷新页面并重新进入消息页重试")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(2000)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"刷新页面异常（继续重定向）：{type(e).__name__}")
                 goto_messages(page)
                 _rand_delay(cfg)
                 continue

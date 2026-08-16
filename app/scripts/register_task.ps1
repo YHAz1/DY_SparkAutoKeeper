@@ -2,36 +2,44 @@ param(
     [string]$Time = "09:00",
     [switch]$Unregister
 )
-# 注册/删除 Windows 定时任务：每日 $Time 自动运行 main.py
-# 特性：唤醒计算机运行 + 错过计划时间尽快补发（开机补发）
+# Register/remove Windows scheduled task: run main.py daily at $Time
+# Features: wake-to-run + catch-up after missed schedule
+# NOTE: keep this file ASCII-only (PowerShell 5.1 reads files as GBK, non-ASCII breaks parsing)
 $ErrorActionPreference = "Stop"
 
 $appDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $condaBase = (& conda info --base | Select-Object -First 1).Trim()
-if (-not $condaBase) { throw "未找到 conda，请先运行 install.bat" }
+if (-not $condaBase) { throw "conda not found, run install.bat first" }
 $pythonExe = Join-Path $condaBase "envs\dy_spark\python.exe"
-if (-not (Test-Path $pythonExe)) { throw "未找到 $pythonExe，请先运行 install.bat" }
+if (-not (Test-Path $pythonExe)) { throw "env dy_spark not found, run install.bat first" }
 
 $taskName = "DYSparkAutoKeeper"
 
 if ($Unregister) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-    Write-Host "已删除定时任务 $taskName"
+    Write-Host "Task $taskName removed"
     exit 0
 }
 
-# 动作：调用 dy_spark 环境的 python 运行 main.py
+# Action: run main.py with dy_spark python
 $action = New-ScheduledTaskAction -Execute $pythonExe -Argument "`"$appDir\main.py`"" -WorkingDirectory $appDir
 
-# 触发器：每日指定时间；休眠/睡眠时唤醒计算机运行
+# Trigger: daily at $Time
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
-$trigger.WakeToRun = $true
 
-# 设置：错过计划时间则尽快启动（保证"开机即补发"）；最长运行 10 分钟
+# Settings: catch up missed schedule, max runtime 10 min
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
-    -Description "抖音自动续火花：每日 $Time 自动给好友发送消息" -Force | Out-Null
+$task = Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
+    -Description "DY Spark AutoKeeper: daily send at $Time" -Force
 
-Write-Host "已注册定时任务 $taskName（每日 $Time，唤醒运行，错过自动补发）"
-Write-Host "查看/删除：scripts\register_task.bat -Time 09:00 | register_task.bat -Unregister"
+# Set wake-to-run (PS5.1 cannot set it on New-ScheduledTaskTrigger, set after registration)
+try {
+    $task.Triggers[0].WakeToRun = $true
+    Set-ScheduledTask -InputObject $task | Out-Null
+    Write-Host "OK: registered $taskName (daily $Time, wake-to-run, catch-up)"
+} catch {
+    Write-Host "OK: registered $taskName (daily $Time, catch-up)"
+    Write-Warning "wake-to-run failed (does not affect scheduled trigger): $($_.Exception.Message)"
+}
+Write-Host "Manage: register_task.bat -Time 09:00 | register_task.bat -Unregister"

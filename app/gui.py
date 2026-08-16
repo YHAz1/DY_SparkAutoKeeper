@@ -28,7 +28,7 @@ DEFAULT_CFG = {
     "friends": [],
     "message": {"text": "[续火花]", "search_friend": False},
     "delays": {"min": 1.5, "max": 3.5},
-    "retry": {"max_attempts": 2, "interval_sec": 10},
+    "retry": {"max_attempts": 3, "interval_sec": 10},
     "browser": {"headless": False, "gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
     "log": {"dir": "logs", "keep_days": 30},
 }

@@ -46,16 +46,18 @@ def main() -> int:
             return 1
 
         page = context.new_page()
-        if not sender.goto_messages(page):
-            log.warning("首次进入消息页失败，等待后重试一次")
-            page.wait_for_timeout(3000)
-            if not sender.goto_messages(page):
-                log.error("无法进入消息页，终止本次任务")
-                return 1
 
         success = 0
         for friend in todo:
             try:
+                # 标准化：每个好友发送前都重新进入消息页（从会话列表视图开始），
+                # 避免上一个好友的聊天窗口残留导致下一个好友定位失败
+                if not sender.goto_messages(page):
+                    log.warning(f"处理 {friend} 前进入消息页失败，重试一次")
+                    page.wait_for_timeout(2000)
+                    if not sender.goto_messages(page):
+                        log.error(f"进入消息页失败，跳过好友 {friend}")
+                        continue
                 if sender.send_to_friend(context, page, friend, cfg):
                     state.mark_sent(friend)
                     success += 1
