@@ -300,6 +300,7 @@ class SparkGUI(QMainWindow):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         container = QWidget()
         container.setObjectName("ScrollContainer")
         self.main_layout = QVBoxLayout(container)
@@ -319,9 +320,9 @@ class SparkGUI(QMainWindow):
         # 版本号与免责声明：固定页脚，不随内容滚动
         self._build_about(outer)
 
-    def _card(self, title: str) -> Card:
+    def _card(self, title: str, stretch: int = 0) -> Card:
         c = Card(title)
-        self.main_layout.addWidget(c)
+        self.main_layout.addWidget(c, stretch)
         return c
 
     def _build_status_card(self):
@@ -455,12 +456,12 @@ class SparkGUI(QMainWindow):
         c.body().addWidget(hint)
 
     def _build_log_card(self):
-        c = self._card("运行日志")
+        c = self._card("运行日志", stretch=1)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
-        self.log_view.setMinimumHeight(300)
-        c.body().addWidget(self.log_view)
+        self.log_view.setMinimumHeight(200)
+        c.body().addWidget(self.log_view, 1)
         row = QHBoxLayout()
         btn_refresh = QPushButton("刷新")
         btn_refresh.setObjectName("Ghost")
@@ -667,6 +668,10 @@ class SparkGUI(QMainWindow):
         event.accept()
 
 
+# 单实例共享内存句柄（保持引用，防止被 GC 回收导致锁失效）
+_SHARED_MEM = None
+
+
 def main():
     # 仅最小化控制台窗口（黑框缩到任务栏），GUI 主窗口正常显示
     try:
@@ -677,6 +682,24 @@ def main():
             ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
     except Exception:
         pass
+
+    # 单实例：重复启动时激活已有窗口并退出，不允许多开
+    from PyQt5.QtCore import QSharedMemory
+
+    global _SHARED_MEM
+    _SHARED_MEM = QSharedMemory("DY_SparkAutoKeeper_singleton")
+    if not _SHARED_MEM.create(1):
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.user32.FindWindowW(None, "DY_SparkAutoKeeper")
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     app.setFont(QFont("Microsoft YaHei", 14))
     win = SparkGUI()
