@@ -48,7 +48,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.yaml")
 LOG_PATH = os.path.join(APP_DIR, "logs", "app.log")
 TASK_NAME = "DYSparkAutoKeeper"
 PS_SCRIPT = os.path.join(APP_DIR, "scripts", "register_task.ps1")
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 # 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
 CREATE_NO_WINDOW = 0x08000000
@@ -549,13 +549,23 @@ class SparkGUI(QMainWindow):
         if name not in existing:
             self.list_friends.addItem(name)
         self.edit_friend.clear()
+        self._save_friends_now()
         self._refresh_task_state()
 
     def _del_friend(self):
         row = self.list_friends.currentRow()
         if row >= 0:
             self.list_friends.takeItem(row)
+            self._save_friends_now()
             self._refresh_task_state()
+
+    def _save_friends_now(self):
+        """好友增删后实时写入 config.yaml（不等待保存/发送）"""
+        self.cfg["friends"] = [self.list_friends.item(i).text() for i in range(self.list_friends.count())]
+        try:
+            save_config(self.cfg)
+        except Exception:
+            pass
 
     def _register_task(self):
         if not self._save_ui_config():
