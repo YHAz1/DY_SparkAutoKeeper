@@ -683,25 +683,31 @@ def main():
     except Exception:
         pass
 
-    # 单实例：重复启动时激活已有窗口并退出，不允许多开
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Microsoft YaHei", 14))
+
+    # 单实例：必须在 QApplication 创建之后（QSharedMemory 依赖 QCoreApplication）
+    # 重复启动时激活已有窗口并退出，不允许多开
     from PyQt5.QtCore import QSharedMemory
 
     global _SHARED_MEM
-    _SHARED_MEM = QSharedMemory("DY_SparkAutoKeeper_singleton")
-    if not _SHARED_MEM.create(1):
-        try:
-            import ctypes
+    try:
+        _SHARED_MEM = QSharedMemory("DY_SparkAutoKeeper_singleton")
+        if not _SHARED_MEM.create(1):
+            try:
+                import ctypes
 
-            hwnd = ctypes.windll.user32.FindWindowW(None, "DY_SparkAutoKeeper")
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
-        except Exception:
-            pass
+                hwnd = ctypes.windll.user32.FindWindowW(None, "DY_SparkAutoKeeper")
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            sys.exit(0)
+    except Exception:
+        # 单实例检测异常时保守退出，避免多开
         sys.exit(0)
 
-    app = QApplication(sys.argv)
-    app.setFont(QFont("Microsoft YaHei", 14))
     win = SparkGUI()
     win.show()
     # 打开时弹公告（使用说明 + 免责声明）：同意进入，不同意则退出
