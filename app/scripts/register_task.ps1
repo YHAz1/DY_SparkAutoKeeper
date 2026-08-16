@@ -29,12 +29,23 @@ if ($Unregister) {
     exit 0
 }
 
+# Action runner: packaged exe (app.exe --run) if present, else conda pythonw main.py
+$exe = Join-Path $appDir "app.exe"
+if (Test-Path $exe) {
+    $runner = $exe
+    $runArg = "--run"
+    Write-Host "OK: packaged mode detected -> $exe"
+} else {
+    $runner = $pythonw
+    $runArg = "`"$appDir\main.py`""
+}
+
 # --- 1) Startup-folder shortcut (runs on every logon, no window) ---
 # Shortcut avoids the WScript.Shell.Run double-quoted-args bug; shell handles quoting.
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut($startupFile)
-$lnk.TargetPath = $pythonw
-$lnk.Arguments = "`"$appDir\main.py`""
+$lnk.TargetPath = $runner
+$lnk.Arguments = $runArg
 $lnk.WorkingDirectory = $appDir
 $lnk.WindowStyle = 7
 $lnk.Save()
@@ -43,7 +54,7 @@ Remove-Item (Join-Path $startupDir "spark_check.bat") -Force -ErrorAction Silent
 Write-Host "OK: startup check installed (shortcut) -> $startupFile"
 
 # --- 2) Daily scheduled task (fallback trigger) ---
-$action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$appDir\main.py`"" -WorkingDirectory $appDir
+$action = New-ScheduledTaskAction -Execute $runner -Argument $runArg -WorkingDirectory $appDir
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 60)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `

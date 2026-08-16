@@ -35,12 +35,23 @@ from PyQt5.QtWidgets import (
 
 import yaml
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _app_dir() -> str:
+    """程序数据目录：打包后为 exe 所在目录，开发时为脚本目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_DIR = _app_dir()
 CONFIG_PATH = os.path.join(APP_DIR, "config.yaml")
 LOG_PATH = os.path.join(APP_DIR, "logs", "app.log")
 TASK_NAME = "DYSparkAutoKeeper"
 PS_SCRIPT = os.path.join(APP_DIR, "scripts", "register_task.ps1")
 VERSION = "1.0.0"
+
+# 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
+CREATE_NO_WINDOW = 0x08000000
 
 USAGE_TEXT = """【使用说明】
 1. 首次使用：点击「立即运行一次」，在弹出的浏览器中扫码登录你的账号；登录态保存在本机，之后自动复用
@@ -161,14 +172,18 @@ def save_config(cfg: dict) -> bool:
 
 
 def task_exists() -> bool:
-    r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME], capture_output=True)
+    r = subprocess.run(
+        ["schtasks", "/Query", "/TN", TASK_NAME],
+        capture_output=True, creationflags=CREATE_NO_WINDOW,
+    )
     return r.returncode == 0
 
 
 def get_env_python() -> str:
     try:
         r = subprocess.run(["conda", "info", "--base"], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=30)
+                           encoding="utf-8", errors="replace", timeout=30,
+                           creationflags=CREATE_NO_WINDOW)
         base = (r.stdout or "").strip().splitlines()
         if base:
             p = os.path.join(base[0], "envs", "dy_spark", "python.exe")
@@ -179,12 +194,12 @@ def get_env_python() -> str:
     return sys.executable
 
 
-def tail_log(path: str, n: int = 300) -> str:
+def tail_log(path: str, n: int = 200) -> str:
     try:
         with open(path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            f.seek(max(0, size - 32768))
+            f.seek(max(0, size - 24576))
             data = f.read().decode("utf-8", errors="replace")
         return "\n".join(data.splitlines()[-n:])
     except Exception:
@@ -262,14 +277,14 @@ class SparkGUI(QMainWindow):
         self._build_ui()
         self._load_config_to_ui()
 
-        # 定时刷新：日志 2 秒、任务状态 5 秒
+        # 定时刷新：日志 2 秒、任务状态 8 秒（降低频率减少卡顿）
         self._last_log_text = ""
         self.timer_log = QTimer(self)
         self.timer_log.timeout.connect(self._refresh_log)
         self.timer_log.start(2000)
         self.timer_task = QTimer(self)
         self.timer_task.timeout.connect(self._refresh_task_state)
-        self.timer_task.start(5000)
+        self.timer_task.start(8000)
         self._refresh_task_state()
         self._refresh_log()
 
@@ -550,6 +565,7 @@ class SparkGUI(QMainWindow):
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                  "-File", PS_SCRIPT, "-Time", t],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90,
+                creationflags=CREATE_NO_WINDOW,
             )
         except Exception as e:
             QMessageBox.critical(self, "注册失败", str(e))
@@ -573,7 +589,7 @@ class SparkGUI(QMainWindow):
         subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", PS_SCRIPT, "-Unregister"],
-            capture_output=True, timeout=90,
+            capture_output=True, timeout=90, creationflags=CREATE_NO_WINDOW,
         )
         self._refresh_task_state()
 
@@ -586,12 +602,18 @@ class SparkGUI(QMainWindow):
         threading.Thread(target=self._run_once_worker, daemon=True).start()
 
     def _run_once_worker(self):
-        python = get_env_python()
+        # 打包版：运行自身（app.exe --run，windowed 无控制台）
+        # 开发版：conda python main.py（CREATE_NO_WINDOW 隐藏黑框）
+        CREATE_NO_WINDOW = 0x08000000
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--run"]
+        else:
+            cmd = [get_env_python(), os.path.join(APP_DIR, "main.py")]
         try:
-            subprocess.run([python, os.path.join(APP_DIR, "main.py")],
-                           cwd=APP_DIR, timeout=900)
+            subprocess.run(cmd, cwd=APP_DIR, timeout=900, creationflags=CREATE_NO_WINDOW)
         except Exception as e:
             import traceback
+
             traceback.print_exc()
         finally:
             self._running = False

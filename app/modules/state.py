@@ -2,9 +2,18 @@
 import datetime
 import json
 import os
+import sys
 from typing import Dict, Optional
 
-STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "state.json")
+
+def _app_dir() -> str:
+    """程序数据目录：打包后为 exe 所在目录，开发时为脚本目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+STATE_FILE = os.path.join(_app_dir(), "data", "state.json")
 
 
 def _load() -> Dict[str, str]:

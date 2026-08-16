@@ -1,6 +1,15 @@
 """登录模块：启动浏览器（持久化登录态）、检测登录态、扫码登录等待。"""
+import os
+import sys
 import time
 from typing import Tuple
+
+# 打包运行时：让 Playwright 使用包内自带的浏览器
+if getattr(sys, "frozen", False):
+    os.environ.setdefault(
+        "PLAYWRIGHT_BROWSERS_PATH",
+        os.path.join(getattr(sys, "_MEIPASS", ""), "ms-playwright"),
+    )
 
 from playwright.sync_api import BrowserContext, sync_playwright
 

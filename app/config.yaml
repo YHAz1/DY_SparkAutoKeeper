@@ -1,22 +1,19 @@
-send_time: 09:00
-friends:
-- 徐志岩
-- 汪钰哲
-- 孙彪耀
+send_time: "09:00"
+friends: []
 message:
-  text: '[续火花吧]'
+  text: "[续火花吧]"
   search_friend: false
 delays:
-  min: 1.0
-  max: 3.0
+  min: 1.5
+  max: 3.5
 retry:
   max_attempts: 3
   interval_sec: 10
 browser:
   headless: false
   gpu: true
-  profile_dir: data/profile
+  profile_dir: "data/profile"
   login_timeout_sec: 180
 log:
-  dir: logs
+  dir: "logs"
   keep_days: 30

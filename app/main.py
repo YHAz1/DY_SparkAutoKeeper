@@ -19,7 +19,15 @@ from modules import sender, state
 from modules.logger import init_logger, get_logger
 from modules.login import ensure_logged_in, launch
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _app_dir() -> str:
+    """程序数据目录：打包后为 exe 所在目录，开发时为脚本目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+APP_DIR = _app_dir()
 LOCK_PATH = os.path.join(APP_DIR, "data", "run.lock")
 
 
