@@ -8,6 +8,8 @@
 """
 import datetime
 import os
+import random
+import subprocess
 import sys
 import time
 
@@ -131,6 +133,54 @@ def _send_all(cfg: dict, log) -> int:
         p.stop()
 
 
+def _task_exists() -> bool:
+    """自启定时任务是否仍存在（用户可能已删除）。"""
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/TN", "DYSparkAutoKeeper"],
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _randomize_next_day(cfg: dict, log) -> None:
+    """每日任务执行结束后：随机明日发送时间（9:00-22:00）并自动更新自启任务。
+    若用户已删除自启任务则跳过（不自动重建）。"""
+    if not _task_exists():
+        log.info("自启任务已被删除，跳过明日时间随机化")
+        return
+    total = random.randint(9 * 60, 22 * 60)
+    new_time = f"{total // 60:02d}:{total % 60:02d}"
+    # 只更新 send_time（重新读 config，避免把绝对路径写回）
+    cfg_path = os.path.join(APP_DIR, "config.yaml")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        data["send_time"] = new_time
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"写入明日发送时间失败：{e}")
+    # 重新注册自启任务（更新每日触发时间）
+    ps = os.path.join(APP_DIR, "scripts", "register_task.ps1")
+    if os.path.exists(ps):
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", ps, "-Time", new_time],
+                capture_output=True, timeout=90,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
+            log.info(f"已随机明日发送时间：{new_time}，并更新自启任务")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"更新自启任务失败：{e}")
+    else:
+        log.warning("未找到 register_task.ps1，仅更新 config 中的时间")
+
+
 def main() -> int:
     cfg = load_config()
     cfg = _resolve_paths(cfg)
@@ -179,7 +229,13 @@ def main() -> int:
         else:
             log.info(f"当前 {now:%H:%M} 已过发送时间 {send_time}，立即补发")
 
-        return _send_all(cfg, log)
+        result = _send_all(cfg, log)
+        # 可选：每日任务执行结束后随机明日时间并自动更新自启（默认关闭=固定时间）
+        if cfg.get("randomize_time", False):
+            _randomize_next_day(cfg, log)
+        else:
+            log.info("未开启自动随机时间（randomize_time=false），明日沿用固定发送时间")
+        return result
     finally:
         _release_lock(lock)
 

@@ -48,7 +48,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.yaml")
 LOG_PATH = os.path.join(APP_DIR, "logs", "app.log")
 TASK_NAME = "DYSparkAutoKeeper"
 PS_SCRIPT = os.path.join(APP_DIR, "scripts", "register_task.ps1")
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 # 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
 CREATE_NO_WINDOW = 0x08000000
@@ -140,6 +140,7 @@ def load_config() -> dict:
         "send_time": "09:00",
         "friends": [],
         "message": {"text": "[续火花吧]", "search_friend": False},
+        "randomize_time": False,
         "delays": {"min": 1.5, "max": 3.5},
         "retry": {"max_attempts": 3, "interval_sec": 10},
         "browser": {"headless": False, "gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
@@ -372,9 +373,13 @@ class SparkGUI(QMainWindow):
         self.edit_time.setPlaceholderText("如 09:00")
         self.edit_time.setFixedWidth(110)
         row1.addWidget(self.edit_time)
+        btn_rand = QPushButton("随机")
+        btn_rand.setObjectName("Ghost")
+        btn_rand.clicked.connect(self._random_time)
+        row1.addWidget(btn_rand)
         row1.addStretch(1)
         grid.addLayout(row1)
-        hint1 = QLabel("格式：HH:MM（24 小时制，如 09:00 / 23:30）。保存后需重新注册自启任务生效。")
+        hint1 = QLabel("格式：HH:MM（24 小时制，如 09:00 / 23:30）。「随机」在 9:00-22:00 区间随机生成。保存后需重新注册自启任务生效。")
         hint1.setObjectName("Hint")
         hint1.setWordWrap(True)
         grid.addWidget(hint1)
@@ -429,6 +434,12 @@ class SparkGUI(QMainWindow):
         v.addWidget(self.chk_gpu)
         self.chk_headless = QCheckBox("无头模式（隐藏浏览器窗口；不推荐，风控更高）")
         v.addWidget(self.chk_headless)
+        self.chk_random = QCheckBox("每日任务后自动随机明日发送时间（9:00-22:00）并更新定时任务")
+        v.addWidget(self.chk_random)
+        hint_r = QLabel("勾选后：每天任务执行完自动随机生成明天的发送时间并更新自启任务（删除自启任务则不再自动更新）。\n不勾选：固定使用上方设置的发送时间。")
+        hint_r.setObjectName("Hint")
+        hint_r.setWordWrap(True)
+        v.addWidget(hint_r)
 
         c.body().addWidget(inner)
         inner.setVisible(False)
@@ -513,6 +524,7 @@ class SparkGUI(QMainWindow):
         self.spin_retry.setValue(int(self.cfg.get("retry", {}).get("max_attempts", 3)))
         self.chk_gpu.setChecked(bool(self.cfg.get("browser", {}).get("gpu", True)))
         self.chk_headless.setChecked(bool(self.cfg.get("browser", {}).get("headless", False)))
+        self.chk_random.setChecked(bool(self.cfg.get("randomize_time", False)))
 
     def _collect_config(self) -> dict:
         """从界面收集配置（不做写盘）。"""
@@ -525,7 +537,15 @@ class SparkGUI(QMainWindow):
         cfg["retry"]["max_attempts"] = int(self.spin_retry.value())
         cfg["browser"]["gpu"] = bool(self.chk_gpu.isChecked())
         cfg["browser"]["headless"] = bool(self.chk_headless.isChecked())
+        cfg["randomize_time"] = bool(self.chk_random.isChecked())
         return cfg
+
+    def _random_time(self):
+        """在 9:00-22:00 区间随机生成发送时间并填入输入框。"""
+        import random
+
+        total = random.randint(9 * 60, 22 * 60)  # 9:00 ~ 22:00（含）
+        self.edit_time.setText(f"{total // 60:02d}:{total % 60:02d}")
 
     def _save_ui_config(self) -> bool:
         """校验并保存配置。"""
@@ -548,6 +568,7 @@ class SparkGUI(QMainWindow):
         existing = [self.list_friends.item(i).text() for i in range(self.list_friends.count())]
         if name not in existing:
             self.list_friends.addItem(name)
+            self.list_friends.scrollToBottom()  # 自动滚动到最新添加的好友
         self.edit_friend.clear()
         self._save_friends_now()
         self._refresh_task_state()

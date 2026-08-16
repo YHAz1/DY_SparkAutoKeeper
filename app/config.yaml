@@ -3,6 +3,7 @@ friends: []
 message:
   text: "[续火花吧]"
   search_friend: false
+randomize_time: false
 delays:
   min: 1.5
   max: 3.5
