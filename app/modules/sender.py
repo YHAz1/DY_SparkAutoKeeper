@@ -24,6 +24,8 @@ MESSAGE_PAGE_URL = None  # 该 URL 兜底不可靠（曾导致页面跳走），
 CONTACT_SEARCH_HINTS = ["联系人", "搜索好友", "找人", "搜索聊天"]
 
 _CLICK_TIMEOUT = 15000
+# 本次进程是否已成功进入过消息页（首次加载慢，需等 6 秒；之后重载快，3 秒即可）
+_ENTERED_MESSAGES = False
 
 
 def _in_message_page(page: Page) -> bool:
@@ -156,6 +158,9 @@ def goto_messages(page: Page, cfg: dict) -> bool:
     注意：点击后 URL 可能仍是 /jingxuan（SPA 切换内容不更新 URL），不做 URL 判定。
     """
     logger = get_logger()
+    global _ENTERED_MESSAGES
+    # 首次进入消息页加载慢（等 6 秒）；同进程内后续重载快（3 秒）
+    wait_after_click = 6000 if not _ENTERED_MESSAGES else 3000
     for attempt in range(1, 4):
         page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
         # 重载首页后等 3 秒（SPA 渲染、事件绑定），不搞长等待
@@ -172,9 +177,10 @@ def goto_messages(page: Page, cfg: dict) -> bool:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"第 {attempt} 次点击消息入口异常：{type(e).__name__} {str(e)[:120]}")
 
-        # 点击消息后等 3 秒（消息页渲染），然后验证会话列表
-        page.wait_for_timeout(3000)
+        # 点击消息后等待消息页渲染：首次 6 秒，后续 3 秒
+        page.wait_for_timeout(wait_after_click)
         if _conversation_visible(page, cfg):
+            _ENTERED_MESSAGES = True
             logger.info("已进入消息页（会话列表出现）")
             return True
         logger.warning(f"第 {attempt} 次点击后未检测到会话列表，重新加载重试")
@@ -389,8 +395,8 @@ def send_to_friend(context: BrowserContext, page: Page, friend: str, cfg: dict) 
     """给单个好友发送消息，成功返回 True（含重试）。"""
     logger = get_logger()
     retry = cfg["retry"]
-    # 发送内容：优先 message.text（如 "[续火花]"），兼容旧配置 fallback_text
-    text = cfg["message"].get("text") or cfg["message"].get("fallback_text", "续火花")
+    # 发送内容：优先 message.text（如 "[续火花吧]"），兼容旧配置 fallback_text
+    text = cfg["message"].get("text") or cfg["message"].get("fallback_text", "[续火花吧]")
     for attempt in range(1, retry["max_attempts"] + 1):
         try:
             if not _open_conversation(page, friend, cfg):
