@@ -710,10 +710,18 @@ def main():
 
     win = SparkGUI()
     win.show()
-    # 打开时弹公告（使用说明 + 免责声明）：同意进入，不同意则退出
-    dlg = NoticeDialog(win)
-    if dlg.exec_() != QDialog.Accepted:
-        sys.exit(0)
+    # 公告只在首次启动显示：看过并同意后记录标记，之后不再弹
+    notice_file = os.path.join(APP_DIR, "data", "notice_agreed.txt")
+    if not os.path.exists(notice_file):
+        dlg = NoticeDialog(win)
+        if dlg.exec_() != QDialog.Accepted:
+            sys.exit(0)
+        try:
+            os.makedirs(os.path.dirname(notice_file), exist_ok=True)
+            with open(notice_file, "w", encoding="utf-8") as f:
+                f.write("1")
+        except Exception:
+            pass
     sys.exit(app.exec_())
 
 
