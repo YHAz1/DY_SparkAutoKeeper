@@ -4,18 +4,20 @@ param(
 )
 # Register/remove auto-start for DY Spark AutoKeeper.
 # No admin required. Two mechanisms (both user-level):
-#   1) Startup-folder VBS -> fully hidden, runs on every logon with 20s delay,
-#      main.py decides: done -> exit | before send time -> wait | past time -> send now
+#   1) Startup-folder shortcut -> runs on every logon, main decides:
+#      done -> exit | before time -> wait | past time -> send now (catch-up)
 #   2) Daily scheduled task at $Time -> scheduled fallback
 # NOTE: keep this file ASCII-only (PowerShell 5.1 reads files as GBK, non-ASCII breaks parsing)
 $ErrorActionPreference = "Stop"
 
-$appDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$condaBase = (& conda info --base | Select-Object -First 1).Trim()
-if (-not $condaBase) { throw "conda not found, run install.bat first" }
-$pythonw = Join-Path $condaBase "envs\dy_spark\pythonw.exe"
-if (-not (Test-Path $pythonw)) { throw "env dy_spark not found, run install.bat first" }
+# Fix mojibake when output is redirected (GUI calls us via subprocess):
+# PS 5.1 writes stdout/stderr in OEM codepage when redirected; force UTF-8 then.
+if ([Console]::IsOutputRedirected -or [Console]::IsErrorRedirected) {
+    try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+    try { [Console]::ErrorEncoding = [System.Text.Encoding]::UTF8 } catch {}
+}
 
+$appDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $taskName = "DYSparkAutoKeeper"
 $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 $startupFile = Join-Path $startupDir "spark_check.lnk"
@@ -25,17 +27,23 @@ if ($Unregister) {
     Remove-Item $startupFile -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $startupDir "spark_check.vbs") -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $startupDir "spark_check.bat") -Force -ErrorAction SilentlyContinue
-    Write-Host "Auto-start removed"
+    Write-Host "OK: auto-start removed"
     exit 0
 }
 
-# Action runner: packaged exe (app.exe --run) if present, else conda pythonw main.py
+# Resolve runner: packaged exe (app.exe --run) if present;
+# otherwise conda pythonw (dev mode). conda is only needed in dev mode,
+# so packaged builds (no conda on the machine) register without conda.
 $exe = Join-Path $appDir "app.exe"
 if (Test-Path $exe) {
     $runner = $exe
     $runArg = "--run"
     Write-Host "OK: packaged mode detected -> $exe"
 } else {
+    $condaBase = (& conda info --base | Select-Object -First 1).Trim()
+    if (-not $condaBase) { throw "conda not found (dev mode requires conda env dy_spark)" }
+    $pythonw = Join-Path $condaBase "envs\dy_spark\pythonw.exe"
+    if (-not (Test-Path $pythonw)) { throw "env dy_spark not found, run install.bat first" }
     $runner = $pythonw
     $runArg = "`"$appDir\main.py`""
 }

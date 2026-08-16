@@ -570,7 +570,7 @@ class SparkGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "注册失败", str(e))
             return
-        ok = "OK: daily task" in (r.stdout or "")
+        ok = r.returncode == 0
         QMessageBox.information(
             self,
             "注册成功" if ok else "注册失败",
