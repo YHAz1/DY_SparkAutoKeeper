@@ -1,4 +1,4 @@
-"""自动续火花 · 设置面板（PyQt5）
+﻿"""自动续火花 · 设置面板（PyQt5）
 
 独立于任务运行：关闭此窗口不影响已注册的定时任务/开机自启。
 功能：好友管理、发送设置、高级设置、自启任务管理、手动运行、实时日志。
@@ -48,7 +48,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.yaml")
 LOG_PATH = os.path.join(APP_DIR, "logs", "app.log")
 TASK_NAME = "DYSparkAutoKeeper"
 PS_SCRIPT = os.path.join(APP_DIR, "scripts", "register_task.ps1")
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 # 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
 CREATE_NO_WINDOW = 0x08000000
