@@ -1,4 +1,4 @@
-"""诊断脚本：探查抖音网页版消息页的真实 DOM 结构，输出到 diag_output.txt。
+"""诊断脚本：探查 DouYin 网页版消息页的真实 DOM 结构，输出到 diag_output.txt。
 用途：修复 sender.py 中的页面元素定位（消息入口、会话列表、聊天输入框、表情按钮、搜索框）。
 运行：conda run -n dy_spark python diag.py  或  scripts\\run_diag.bat
 """

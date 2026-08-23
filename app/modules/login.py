@@ -15,7 +15,7 @@ from playwright.sync_api import BrowserContext, sync_playwright
 
 from modules.logger import get_logger
 
-# 抖音登录态核心 cookie（网页版登录后存在 sessionid 即视为已登录）
+# DouYin 登录态核心 cookie（网页版登录后存在 sessionid 即视为已登录）
 _SESSION_COOKIE = "sessionid"
 
 
@@ -46,7 +46,7 @@ def launch(profile_dir: str, headless: bool = False, gpu: bool = True) -> Tuple[
 
 
 def ensure_logged_in(context: BrowserContext, timeout_sec: int = 180) -> bool:
-    """确保已登录。未登录时打开抖音主页，提示用户在浏览器窗口中扫码，轮询等待。
+    """确保已登录。未登录时打开 DouYin 主页，提示用户在浏览器窗口中扫码，轮询等待。
     返回是否登录成功。"""
     logger = get_logger()
     page = context.new_page()
@@ -61,7 +61,7 @@ def ensure_logged_in(context: BrowserContext, timeout_sec: int = 180) -> bool:
             logger.info("登录态检测通过")
             return True
 
-        logger.info("未检测到登录态，请在弹出的浏览器窗口中扫码登录抖音…")
+        logger.info("未检测到登录态，请在弹出的浏览器窗口中扫码登录 DouYin…")
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
             page.wait_for_timeout(2000)

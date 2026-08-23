@@ -457,7 +457,7 @@ def goto_messages(page: Page, cfg: dict) -> bool:
                     page.wait_for_timeout(500)
                 break
             if _panel_list_open(page) and _chat_open(page):
-                # 抖音可能直接恢复上次聊天页 → 退出到列表也算成功
+                # DouYin 可能直接恢复上次聊天页 → 退出到列表也算成功
                 if _exit_chat_to_list(page):
                     opened = True
                     break
@@ -536,7 +536,7 @@ def _send_text(page: Page, text: str) -> bool:
     """在聊天输入框输入文字并发送。
     成功判断采用双信号（任一成立即成功）：
       信号1：聊天窗口文本发生变化（消息真的上屏了——最可靠，不猜 class）；
-      信号2：输入框被清空或消失（发送成功后抖音会清空/重建输入框）。
+      信号2：输入框被清空或消失（发送成功后 DouYin 会清空/重建输入框）。
     输入采用逐字键入（press_sequentially），触发真实输入事件，适配 React 受控输入框。"""
     logger = get_logger()
     box = _chat_input(page)

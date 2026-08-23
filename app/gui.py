@@ -1,4 +1,4 @@
-"""抖音自动续火花 · 轻量配置面板（tkinter，Python 内置，零额外依赖）。"""
+"""DouYin 自动续火花 · 轻量配置面板（tkinter，Python 内置，零额外依赖）。"""
 import os
 import re
 import subprocess
@@ -72,7 +72,7 @@ def _tail(path: str, n: int = 200) -> list:
 class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        root.title("抖音自动续火花 · 配置面板")
+        root.title("DouYin 自动续火花 · 配置面板")
         root.geometry("540x680")
         root.minsize(500, 620)
 
@@ -161,7 +161,7 @@ class App:
         ttk.Label(row2, text="发送内容:").pack(side="left")
         self.text_var = tk.StringVar(value=self.cfg["message"].get("text", "[续火花]"))
         ttk.Entry(row2, textvariable=self.text_var, width=24).pack(side="left", padx=(6, 0))
-        ttk.Label(row2, text="（抖音输入 [续火花] 会自动转为火花表情）").pack(side="left", padx=8)
+        ttk.Label(row2, text="（DouYin 输入 [续火花] 会自动转为火花表情）").pack(side="left", padx=8)
 
         # 操作按钮
         fr_ops = ttk.Frame(self.root)
