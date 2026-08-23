@@ -2,18 +2,18 @@
 
 # DY_SparkAutoKeeper
 
-**抖音网页版火花自动维护工具**
+**DouYin 网页版火花自动维护工具**
 
-基于 Playwright 的本地自动化方案 —— 每天在指定时间自动为好友续上火化，无需人工值守。
+基于 Playwright 的本地自动化方案 —— 每天在指定时间自动为好友续上火花，无需人工值守。
 
 [![Version](https://img.shields.io/badge/version-1.2.0-E8935A)](https://github.com/YHAz1/DY_SparkAutoKeeper/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)](https://github.com/YHAz1/DY_SparkAutoKeeper/releases)
 [![Engine](https://img.shields.io/badge/engine-Playwright%20·%20Chromium-2EAD33)](https://playwright.dev/python/)
 [![GUI](https://img.shields.io/badge/GUI-PyQt5-41CD52)](https://www.riverbankcomputing.com/software/pyqt/)
 [![Issues](https://img.shields.io/github/issues/YHAz1/DY_SparkAutoKeeper-E8935A)](https://github.com/YHAz1/DY_SparkAutoKeeper/issues)
-[![License](https://img.shields.io/badge/license-Restricted-red)](#-免责声明)
+[![License](https://img.shields.io/badge/license-Restricted-red)](#disclaimer)
 
-**本项目仅供个人学习与技术交流使用。下载或使用前请务必阅读[免责声明](#-免责声明)。**
+**本项目仅供个人学习与技术交流使用。下载或使用前请务必阅读[免责声明](#disclaimer)。**
 
 </div>
 
@@ -21,44 +21,52 @@
 
 ## 目录
 
-- [功能特性](#-功能特性)
-- [快速开始](#-快速开始)
-- [使用指南](#-使用指南)
-- [配置说明](#-配置说明)
-- [定时与唤醒机制](#-定时与唤醒机制)
-- [项目结构](#-项目结构)
-- [常见问题](#-常见问题)
-- [反馈与支持](#-反馈与支持)
-- [免责声明](#-免责声明)
-- [许可证](#-许可证)
+- [功能特性](#features)
+- [快速开始](#quickstart)
+- [使用指南](#usage)
+- [配置说明](#configuration)
+- [定时与唤醒机制](#scheduling)
+- [项目结构](#structure)
+- [常见问题](#faq)
+- [反馈与支持](#feedback)
+- [免责声明](#disclaimer)
+- [许可证](#license)
 
 ---
+
+<a id="features"></a>
 
 ## ✨ 功能特性
 
 ### 核心
-- **定时自动发送**：每日在指定时间向一位或多位好友自动发送 `[续火花吧]`（抖音自动将文本转为火花表情），维持火花不断
+
+- **定时自动发送**：每日在指定时间向一位或多位好友自动发送 `[续火花吧]`（DouYin 自动将文本转为火花表情），维持火花不断
 - **智能会话定位**：自动打开消息面板，对会话列表逐屏扫描定位目标好友——无论对方排在列表什么位置均可命中；面板内搜索作为二级兜底
 - **发送结果双信号确认**：以「聊天窗口内容变化」+「输入框清空」双重信号判定真实送达，杜绝假成功
 
 ### 调度
+
 - **双通道自启**：Windows 任务计划程序每日定时触发 + 启动文件夹登录检查兜底
 - **智能补发**：错过定点（关机/睡眠）后，下次开机登录自动检测并立即补发
 - **睡眠唤醒**：注册任务自带 `WakeToRun` 参数，电脑睡眠中也可按时唤醒执行
 - **单实例保护**：文件锁防止多实例并发重复发送
 
 ### 可靠性与拟人化
+
 - 随机延迟 + 逐字键入模拟真人输入节奏
 - 好友定位失败自动降级：滚动查找 → 面板内搜索 → 刷新重试
 - 发送时间输入自动纠错：`9：5`、`9点30`、`930`、`２１` 等写法均自动转为标准 `HH:MM`
 - 发送记录原子写入，异常断电不会导致状态损坏或重复发送
 
 ### 界面（PyQt5）
+
 - 图形化管理好友列表、发送时间/内容、重试参数、GPU 渲染开关
 - 一键注册/删除自启任务、一键手动运行、实时运行日志
 - 可选「每日任务后自动随机明日发送时间」（9:00–22:00 区间）
 
 ---
+
+<a id="quickstart"></a>
 
 ## 📦 快速开始
 
@@ -67,7 +75,7 @@
 1. 从 [Releases](https://github.com/YHAz1/DY_SparkAutoKeeper/releases) 下载 `DY_SparkAutoKeeper_vX.X.X_win64.zip`
 2. 解压到任意目录（路径建议不含特殊字符）
 3. 双击 `app.exe` 启动控制面板
-4. 首次使用点击「立即运行一次」，在弹出的浏览器中扫码登录抖音
+4. 首次使用点击「立即运行一次」，在弹出的浏览器中扫码登录
 5. 添加好友备注、设置发送时间，点击「注册自启任务」即可
 
 > 内置 Chromium 与全部依赖，**无需安装 Python 或任何环境**。
@@ -90,6 +98,8 @@ conda run -n dy_spark python app\main.py
 
 ---
 
+<a id="usage"></a>
+
 ## 🚀 使用指南
 
 | 步骤 | 操作 | 说明 |
@@ -102,6 +112,8 @@ conda run -n dy_spark python app\main.py
 
 ---
 
+<a id="configuration"></a>
+
 ## ⚙️ 配置说明
 
 所有配置保存在程序目录下的 `config.yaml`，可通过 GUI 修改，也可直接编辑：
@@ -110,7 +122,7 @@ conda run -n dy_spark python app\main.py
 |---|---|---|
 | `send_time` | 每日发送时间（HH:MM） | `09:00` |
 | `friends` | 好友备注名列表 | `[]` |
-| `message.text` | 发送内容（抖音自动转为对应表情） | `[续火花吧]` |
+| `message.text` | 发送内容（DouYin 自动转为对应表情） | `[续火花吧]` |
 | `randomize_time` | 每日任务完成后自动随机明日发送时间（9:00–22:00） | `false` |
 | `delays.min/max` | 输入前后拟人化随机延迟范围（秒） | `1.0 / 3.0` |
 | `retry.max_attempts` | 单个好友失败重试次数 | `3` |
@@ -121,6 +133,8 @@ conda run -n dy_spark python app\main.py
 > **数据隐私**：登录态（`data/profile`）、发送记录（`data/state.json`）、日志（`logs/`）全部仅存储于本机，本程序不做任何网络上传。
 
 ---
+
+<a id="scheduling"></a>
 
 ## ⏰ 定时与唤醒机制
 
@@ -133,6 +147,8 @@ conda run -n dy_spark python app\main.py
 \* 需系统电源计划允许「唤醒计时器」（Windows 默认开启交流电唤醒）。
 
 ---
+
+<a id="structure"></a>
 
 ## 📁 项目结构
 
@@ -156,6 +172,8 @@ app/
 ```
 
 ---
+
+<a id="faq"></a>
 
 ## ❓ 常见问题
 
@@ -191,13 +209,15 @@ app/
 
 ---
 
+<a id="feedback"></a>
+
 ## 🐛 反馈与支持
 
 欢迎通过 [GitHub Issues](https://github.com/YHAz1/DY_SparkAutoKeeper/issues) 反馈：
 
 - **Bug 反馈**：请附上运行日志 `logs/app.log` 的相关片段、复现步骤与预期行为
 - **功能建议**：描述使用场景与期望效果即可
-- **页面改版失效**：抖音网页前端更新可能导致元素定位失效，可运行诊断脚本并将输出一并提交：
+- **页面改版失效**：DouYin 网页前端更新可能导致元素定位失效，可运行诊断脚本并将输出一并提交：
 
 ```bat
 conda run -n dy_spark python app\diag.py
@@ -206,6 +226,8 @@ conda run -n dy_spark python app\diag.py
 > ⚠️ 提交 Issue 前**务必删除日志中的个人信息**（好友备注名等），切勿上传 `data/profile`、`data/state.json` 等含凭证/隐私的文件。
 
 ---
+
+<a id="disclaimer"></a>
 
 ## ⚠️ 免责声明
 
@@ -222,6 +244,8 @@ conda run -n dy_spark python app\diag.py
 8. 使用本工具即表示已阅读并同意以上全部条款。
 
 ---
+
+<a id="license"></a>
 
 ## 📄 许可证
 
