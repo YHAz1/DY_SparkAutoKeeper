@@ -1,8 +1,8 @@
-<div align="center">
+﻿<div align="center">
 
 # DY_SparkAutoKeeper
 
-**DouYin 网页版火花自动维护工具**
+**DouYin网页版火花自动维护工具**
 
 基于 Playwright 的本地自动化方案 —— 每天在指定时间自动为好友续上火花，无需人工值守。
 
