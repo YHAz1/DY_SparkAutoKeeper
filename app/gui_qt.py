@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import datetime
+import json
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
@@ -48,7 +49,7 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.yaml")
 LOG_PATH = os.path.join(APP_DIR, "logs", "app.log")
 TASK_NAME = "DYSparkAutoKeeper"
 PS_SCRIPT = os.path.join(APP_DIR, "scripts", "register_task.ps1")
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
 CREATE_NO_WINDOW = 0x08000000
@@ -379,7 +380,7 @@ class SparkGUI(QMainWindow):
         row1.addWidget(btn_rand)
         row1.addStretch(1)
         grid.addLayout(row1)
-        hint1 = QLabel("格式：HH:MM（24 小时制，如 09:00 / 23:30）。「随机」在 9:00-22:00 区间随机生成。保存后需重新注册自启任务生效。")
+        hint1 = QLabel("格式：HH:MM（24 小时制，如 09:00 / 23:30）。「随机」在 9:00-22:00 区间随机生成。保存后需重新注册自启任务生效。\n支持自动纠正：9：5、9点5、930 等写法会自动转为 09:05 / 09:30。")
         hint1.setObjectName("Hint")
         hint1.setWordWrap(True)
         grid.addWidget(hint1)
@@ -547,12 +548,46 @@ class SparkGUI(QMainWindow):
         total = random.randint(9 * 60, 22 * 60)  # 9:00 ~ 22:00（含）
         self.edit_time.setText(f"{total // 60:02d}:{total % 60:02d}")
 
+    def _normalize_time(self, raw) -> str:
+        """时间输入自动纠错，返回标准 HH:MM；无法识别返回空串。
+        支持：全角字符（０９：３０→09:30）、中文冒号/点/时（9点30→09:30）、
+        缺前导零（9:5→09:05）、无冒号写法（930→09:30、9→09:00）、末尾"分"。"""
+        import unicodedata
+
+        s = unicodedata.normalize("NFKC", str(raw)).strip()
+        s = re.sub(r"\s+", "", s)
+        s = re.sub(r"[点时]", ":", s)
+        s = re.sub(r"[：﹕;；,，。．.]", ":", s)
+        s = re.sub(r"(?:分钟|分)$", "", s)
+        if not s:
+            return ""
+        if re.fullmatch(r"\d{1,2}", s):  # 只有小时：9 -> 09:00
+            h = int(s)
+            return f"{h:02d}:00" if h <= 23 else ""
+        if re.fullmatch(r"\d{3,4}", s):  # HMM/HHMM：930 -> 09:30
+            d = s.zfill(4)
+            h, m = int(d[:2]), int(d[2:])
+            return f"{h:02d}:{m:02d}" if h <= 23 and m <= 59 else ""
+        parts = s.split(":")
+        if len(parts) == 2 and all(p.isdigit() and len(p) <= 2 for p in parts):
+            h, m = int(parts[0]), int(parts[1])
+            return f"{h:02d}:{m:02d}" if h <= 23 and m <= 59 else ""
+        return ""
+
     def _save_ui_config(self) -> bool:
-        """校验并保存配置。"""
-        t = self.edit_time.text().strip()
-        if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", t):
-            QMessageBox.warning(self, "时间格式错误", "发送时间格式应为 HH:MM，例如 09:00")
+        """校验并保存配置（发送时间先做自动纠错）。"""
+        norm = self._normalize_time(self.edit_time.text())
+        if not norm:
+            QMessageBox.warning(
+                self,
+                "时间格式错误",
+                f"无法识别的时间输入:{self.edit_time.text().strip()!r}\n"
+                "小时 0-23、分钟 0-59,例如 09:00。\n"
+                "支持自动纠正:中文冒号(9:30)、缺前导零(9:5)、无冒号(930)、"
+                "只填小时(21)等常见写法。",
+            )
             return False
+        self.edit_time.setText(norm)  # 回填纠正后的标准格式
         self._collect_config()
         if save_config(self.cfg):
             return True
@@ -642,7 +677,7 @@ class SparkGUI(QMainWindow):
         else:
             cmd = [get_env_python(), os.path.join(APP_DIR, "main.py")]
         try:
-            subprocess.run(cmd, cwd=APP_DIR, timeout=900, creationflags=CREATE_NO_WINDOW)
+            subprocess.run(cmd, cwd=APP_DIR, timeout=1800, creationflags=CREATE_NO_WINDOW)
         except Exception as e:
             import traceback
 
@@ -672,7 +707,7 @@ class SparkGUI(QMainWindow):
         if os.path.exists(st_path):
             try:
                 with open(st_path, encoding="utf-8") as f:
-                    st = yaml.safe_load(f) or {}
+                    st = json.load(f) or {}  # state.json 是 JSON，勿用 yaml 解析
                 done = sum(1 for name in friends if (st.get(name) or "")[:10] == today)
             except Exception:
                 pass

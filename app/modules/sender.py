@@ -18,6 +18,8 @@ from playwright.sync_api import BrowserContext, Locator, Page
 from modules.logger import get_logger
 
 # ---------- 实测页面元素定位（网页版改版时优先调整这里，可用 diag_layout*.py 复查） ----------
+# 注意：sender 里若干位置过滤（如返回按钮 x<1000/y<110、导航"消息"y<60）依赖
+# login.launch 固定的 1280x800 视口；若修改视口尺寸需同步复核这些阈值。
 MSG_TAB_TEXT = "消息"
 LIST_SEL = '[class*="ConversationListwrapper"]'       # 会话列表滚动容器（overflowY=scroll）
 ITEM_TITLE_SEL = '[class*="ConversationItemtitle"]'   # 会话项标题（纯昵称文本）
@@ -289,12 +291,30 @@ def _try_search_in_panel(page: Page, friend: str) -> bool:
         except Exception:  # noqa: BLE001
             pass
         box.press_sequentially(friend, delay=90)
+
+        def _pick_result():
+            """在搜索结果里选目标：标题文本精确等于好友名的优先，
+            避免子串误匹配（如"马锐"命中"马锐群"）；没有精确项再退回首个子串结果。"""
+            cand = page.locator(SEARCH_RESULT_SEL, has_text=friend)
+            n = cand.count()
+            if not n:
+                return None
+            for i in range(n):
+                el = cand.nth(i)
+                try:
+                    t_el = el.locator('[class*="SearchPanelitemtitle"]').first
+                    txt = ((t_el.inner_text() if t_el.count() else el.inner_text()) or "").strip()
+                    if txt == friend:
+                        return el
+                except Exception:  # noqa: BLE001
+                    continue
+            return cand.first
+
         # 等待搜索结果下拉出现（最多 4 秒）
         item = None
         for _ in range(8):
-            cand = page.locator(SEARCH_RESULT_SEL, has_text=friend)
-            if cand.count():
-                item = cand.first
+            item = _pick_result()
+            if item is not None:
                 break
             page.wait_for_timeout(500)
         if item is None:
@@ -337,6 +357,9 @@ def _open_conversation(page: Page, friend: str, cfg: dict) -> bool:
     1) 回滚列表到顶部 → 当前视口直找 → 列表内滚动查找（覆盖屏幕外的会话）；
     2) 找不到再用面板内搜索框兜底（不会跳全局 AI 搜索）。"""
     logger = get_logger()
+    if not str(friend).strip():
+        logger.warning("好友名为空，跳过（请检查 config.yaml 的 friends 列表）")
+        return False
 
     # 保险：若仍停在聊天页，先回列表
     if _chat_open(page) and not _exit_chat_to_list(page):

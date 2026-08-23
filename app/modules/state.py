@@ -27,9 +27,13 @@ def _load() -> Dict[str, str]:
 
 
 def _save(state: Dict[str, str]) -> None:
+    """原子写入：先写临时文件再替换，避免写入中途崩溃导致 JSON 损坏
+    （损坏会让下次启动误判"所有人都没发过"，从而重复发送）。"""
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATE_FILE)
 
 
 def last_sent_time(friend: str) -> Optional[str]:

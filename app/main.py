@@ -187,6 +187,9 @@ def main() -> int:
     log = init_logger(cfg["log"]["dir"], cfg["log"]["keep_days"])
 
     friends = cfg["friends"]
+    # 防御：过滤空/纯空白好友名（手动编辑 config.yaml 可能引入），避免发送时误匹配
+    cfg["friends"] = [str(f).strip() for f in (friends or []) if str(f).strip()]
+    friends = cfg["friends"]
     if not friends:
         log.error("config.yaml 中 friends 为空，请先配置好友昵称")
         return 1

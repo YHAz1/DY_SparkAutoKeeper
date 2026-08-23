@@ -62,9 +62,14 @@ Remove-Item (Join-Path $startupDir "spark_check.bat") -Force -ErrorAction Silent
 Write-Host "OK: startup check installed (shortcut) -> $startupFile"
 
 # --- 2) Daily scheduled task (fallback trigger) ---
+# Settings notes (2026-08-23 fix): allow start on battery + wake timers.
+# Without -AllowStartIfOnBatteries the task silently skipped once when the PC
+# woke from sleep (power source read as battery right after resume).
+# -WakeToRun lets the machine wake up at send time even if it is asleep.
 $action = New-ScheduledTaskAction -Execute $runner -Argument $runArg -WorkingDirectory $appDir
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 60)
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -WakeToRun -ExecutionTimeLimit (New-TimeSpan -Minutes 60)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
     -Description "DY Spark AutoKeeper: daily send at $Time" -Force | Out-Null
 Write-Host "OK: daily task $taskName registered at $Time"
