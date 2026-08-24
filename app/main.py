@@ -31,14 +31,39 @@ def _app_dir() -> str:
 
 APP_DIR = _app_dir()
 LOCK_PATH = os.path.join(APP_DIR, "data", "run.lock")
+SESSION_MARK = os.path.join(APP_DIR, "data", ".session_ok")
+
+
+def _session_mark() -> str:
+    """登录确认标记文件路径（login 模块在登录成功后写入，GUI 据此显示状态）。"""
+    return SESSION_MARK
+
+
+_DEFAULT_CONFIG = {
+    "send_time": "09:00",
+    "friends": [],
+    "message": {"text": "[续火花吧]", "search_friend": False},
+    "randomize_time": False,
+    "delays": {"min": 1.0, "max": 3.0},
+    "retry": {"max_attempts": 3, "interval_sec": 10},
+    "browser": {"gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
+    "log": {"dir": "logs", "keep_days": 30},
+}
 
 
 def load_config(path: str = "") -> dict:
-    """加载配置；默认基于 APP_DIR 的绝对路径，不依赖启动时的工作目录。"""
+    """加载配置；默认基于 APP_DIR 的绝对路径，不依赖启动时的工作目录。
+    配置文件不存在时返回内置默认值（分发包不含 config.yaml，首次保存时才生成）。"""
     if not path:
         path = os.path.join(APP_DIR, "config.yaml")
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return dict(_DEFAULT_CONFIG)
+    for k, v in _DEFAULT_CONFIG.items():
+        cfg.setdefault(k, v)
+    return cfg
 
 
 def _resolve_paths(cfg: dict) -> dict:
@@ -97,7 +122,6 @@ def _send_all(cfg: dict, log) -> int:
     log.info(f"本次需要发送的好友：{todo}")
     p, context = launch(
         cfg["browser"]["profile_dir"],
-        cfg["browser"]["headless"],
         cfg["browser"].get("gpu", True),
     )
     try:
@@ -191,8 +215,7 @@ def main() -> int:
     cfg["friends"] = [str(f).strip() for f in (friends or []) if str(f).strip()]
     friends = cfg["friends"]
     if not friends:
-        log.error("config.yaml 中 friends 为空，请先配置好友昵称")
-        return 1
+        log.info("尚未配置好友：本次运行将只进行登录检查/扫码登录")
 
     # 进程锁：开机触发与每日定时触发可能并发，只允许一个实例执行
     lock = _acquire_lock()
@@ -206,31 +229,52 @@ def main() -> int:
             log.info(f"以下好友今天已发送过，跳过：{skipped}")
         todo = [f for f in friends if state.need_send(f)]
         if not todo:
-            log.info("今天所有好友均已发送，无需操作")
-            return 0
+            if friends:
+                log.info("今天所有好友均已发送，无需操作")
+                return 0
+            if os.path.exists(_session_mark()):
+                log.info("已登录但尚未配置好友，无需发送；请在面板添加好友后点「注册自启任务」")
+                return 0
+            log.info("首次使用：将打开浏览器等待扫码登录（完成后即可在面板配置好友与时间）")
+            # 继续往下走"仅登录"流程
 
-        send_time = str(cfg.get("send_time", "09:00"))
-        hh, mm = _parse_send_time(send_time)
-        now = datetime.datetime.now()
-        target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        # 未到发送时间的等待逻辑只对真实发送任务生效；首次登录不受发送时间限制
+        if todo:
+            send_time = str(cfg.get("send_time", "09:00"))
+            hh, mm = _parse_send_time(send_time)
+            now = datetime.datetime.now()
+            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
 
-        if now < target:
-            wait_sec = int((target - now).total_seconds())
-            log.info(
-                f"还有 {len(todo)} 个好友未发送；当前 {now:%H:%M} 未到发送时间 {send_time}，"
-                f"等待 {wait_sec} 秒后发送"
-            )
-            waited = 0
-            while waited < wait_sec:
-                time.sleep(min(30, wait_sec - waited))
-                waited += 30
-                # 等待期间若今天已完成（其他实例发送了）→ 退出
-                if not [f for f in friends if state.need_send(f)]:
-                    log.info("等待期间检测到今天已完成，退出")
-                    return 0
-            log.info(f"已到发送时间 {send_time}，开始发送")
-        else:
-            log.info(f"当前 {now:%H:%M} 已过发送时间 {send_time}，立即补发")
+            if now < target:
+                wait_sec = int((target - now).total_seconds())
+                log.info(
+                    f"还有 {len(todo)} 个好友未发送；当前 {now:%H:%M} 未到发送时间 {send_time}，"
+                    f"等待 {wait_sec} 秒后发送"
+                )
+                waited = 0
+                while waited < wait_sec:
+                    time.sleep(min(30, wait_sec - waited))
+                    waited += 30
+                    # 等待期间若今天已完成（其他实例发送了）→ 退出
+                    if not [f for f in friends if state.need_send(f)]:
+                        log.info("等待期间检测到今天已完成，退出")
+                        return 0
+                log.info(f"已到发送时间 {send_time}，开始发送")
+            else:
+                log.info(f"当前 {now:%H:%M} 已过发送时间 {send_time}，立即补发")
+
+        # ---- 仅登录流程（首次使用、未配置好友时）----
+        if not todo:
+            p, context = launch(cfg["browser"]["profile_dir"], cfg["browser"].get("gpu", True))
+            try:
+                if not ensure_logged_in(context, cfg["browser"]["login_timeout_sec"]):
+                    log.error("登录未完成，终止本次任务")
+                    return 1
+                log.info("登录态已就绪 ✔ 请回到面板：① 添加好友备注 → ② 设定发送时间 → ③ 点「注册自启任务」")
+                return 0
+            finally:
+                context.close()
+                p.stop()
 
         result = _send_all(cfg, log)
         # 可选：每日任务执行结束后随机明日时间并自动更新自启（默认关闭=固定时间）

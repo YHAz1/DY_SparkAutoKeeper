@@ -7,10 +7,15 @@ _LOG = None
 
 
 def get_logger() -> logging.Logger:
-    """获取全局 logger（首次调用时初始化）。"""
+    """获取全局 logger。未显式初始化时自动降级为 NullHandler（仅控制台静默），
+    便于 GUI 进程内直接调用各模块而不产生文件日志。"""
     global _LOG
     if _LOG is None:
-        raise RuntimeError("logger 未初始化，请先调用 init_logger()")
+        lg = logging.getLogger("dy_spark")
+        lg.setLevel(logging.INFO)
+        lg.propagate = False
+        lg.addHandler(logging.NullHandler())
+        _LOG = lg
     return _LOG
 
 

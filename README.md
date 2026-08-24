@@ -81,6 +81,16 @@
 > 内置 Chromium 与全部依赖，**无需安装 Python 或任何环境**。
 > 程序无数字签名，若出现 SmartScreen 提示，点击「更多信息 → 仍要运行」。
 
+#### 升级已安装的版本
+
+1. 完全关闭正在运行的程序
+2. 将新版压缩包内的 `app` 文件夹**直接覆盖解压到原目录**（选择「替换目标中的文件」）
+3. 完成——好友配置、登录状态、发送记录全部自动保留
+
+> 分发包不包含 `config.yaml` 与 `data/`，因此覆盖安装不会动你的任何数据；
+> 包内附有《更新说明.txt》。若想更换目录安装，把旧目录的 `data/` 文件夹
+> 和 `config.yaml` 复制过去即可。
+
 ### 方式二：源码运行（开发者）
 
 环境要求：Windows 10/11、Anaconda（或 Miniconda）
@@ -126,7 +136,6 @@ conda run -n dy_spark python app\main.py
 | `randomize_time` | 每日任务完成后自动随机明日发送时间（9:00–22:00） | `false` |
 | `delays.min/max` | 输入前后拟人化随机延迟范围（秒） | `1.0 / 3.0` |
 | `retry.max_attempts` | 单个好友失败重试次数 | `3` |
-| `browser.headless` | 无头模式（后台运行不显示窗口） | `false` |
 | `browser.gpu` | GPU 渲染加速 | `true` |
 | `log.keep_days` | 日志保留天数 | `30` |
 

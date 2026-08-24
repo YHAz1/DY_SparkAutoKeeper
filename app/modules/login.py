@@ -26,8 +26,9 @@ def _is_logged_in(context: BrowserContext) -> bool:
     return False
 
 
-def launch(profile_dir: str, headless: bool = False, gpu: bool = True) -> Tuple[object, BrowserContext]:
+def launch(profile_dir: str, gpu: bool = True) -> Tuple[object, BrowserContext]:
     """启动浏览器（持久化 profile，含登录 cookie）。返回 (playwright, context)。
+    固定有头模式：无头模式在部分环境下易崩溃且风控更高，已移除该选项。
     gpu=False 时禁用 GPU 渲染（纯软件渲染更慢但完全不占显卡，适合显卡正跑模型时）。"""
     logger = get_logger()
     args = ["--disable-blink-features=AutomationControlled"]
@@ -36,13 +37,27 @@ def launch(profile_dir: str, headless: bool = False, gpu: bool = True) -> Tuple[
     p = sync_playwright().start()
     context = p.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
-        headless=headless,
-        viewport={"width": 1280, "height": 800},
+        headless=False,
         args=args,
         locale="zh-CN",
     )
-    logger.info(f"浏览器已启动（headless={headless}, gpu={'开' if gpu else '关'}, profile={profile_dir}）")
+    logger.info(f"浏览器已启动（gpu={'开' if gpu else '关'}, profile={profile_dir}）")
     return p, context
+
+
+def _mark_logged_in() -> None:
+    """登录成功后写确认标记（GUI 状态徽章据此显示已登录/未登录）。"""
+    try:
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        d = os.path.join(base, "data")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, ".session_ok"), "w", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def ensure_logged_in(context: BrowserContext, timeout_sec: int = 180) -> bool:
@@ -53,12 +68,14 @@ def ensure_logged_in(context: BrowserContext, timeout_sec: int = 180) -> bool:
     try:
         if _is_logged_in(context):
             logger.info("检测到已有登录态（sessionid），无需重新登录")
+            _mark_logged_in()
             return True
 
         page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
         if _is_logged_in(context):
             logger.info("登录态检测通过")
+            _mark_logged_in()
             return True
 
         logger.info("未检测到登录态，请在弹出的浏览器窗口中扫码登录 DouYin…")
@@ -67,6 +84,7 @@ def ensure_logged_in(context: BrowserContext, timeout_sec: int = 180) -> bool:
             page.wait_for_timeout(2000)
             if _is_logged_in(context):
                 logger.info("扫码登录成功")
+                _mark_logged_in()
                 return True
         logger.error(f"等待登录超时（{timeout_sec}s），请重新运行本程序并完成扫码")
         return False

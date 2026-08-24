@@ -47,9 +47,10 @@ def _app_dir() -> str:
 APP_DIR = _app_dir()
 CONFIG_PATH = os.path.join(APP_DIR, "config.yaml")
 LOG_PATH = os.path.join(APP_DIR, "logs", "app.log")
+SESSION_MARK = os.path.join(APP_DIR, "data", ".session_ok")
 TASK_NAME = "DYSparkAutoKeeper"
 PS_SCRIPT = os.path.join(APP_DIR, "scripts", "register_task.ps1")
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
 CREATE_NO_WINDOW = 0x08000000
@@ -130,6 +131,7 @@ QScrollBar::handle:vertical { background: #E5D9CC; border-radius: 5px; min-heigh
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QLabel#BadgeGreen { color: #FFFFFF; background: #7FB77F; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
 QLabel#BadgeRed { color: #FFFFFF; background: #D98A8A; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
+QLabel#GuideCard { background: #FFF4E2; color: #8A5A28; border: 1px solid #EFDCBB; border-radius: 10px; padding: 12px 16px; font-size: 16px; }
 QLabel#AboutText { color: #B5A99B; font-size: 14px; }
 """
 
@@ -144,7 +146,7 @@ def load_config() -> dict:
         "randomize_time": False,
         "delays": {"min": 1.5, "max": 3.5},
         "retry": {"max_attempts": 3, "interval_sec": 10},
-        "browser": {"headless": False, "gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
+        "browser": {"gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
         "log": {"dir": "logs", "keep_days": 30},
     }
     if os.path.exists(CONFIG_PATH):
@@ -289,6 +291,9 @@ class SparkGUI(QMainWindow):
         self.timer_task.start(8000)
         self._refresh_task_state()
         self._refresh_log()
+        # 老用户升级场景：有配置但无登录标记 → 后台静默校准一次登录状态
+        self._login_checking = False
+        self._maybe_check_login_async()
 
     # ---------- 界面构建 ----------
 
@@ -338,11 +343,26 @@ class SparkGUI(QMainWindow):
         self.badge_today.setObjectName("BadgeRed")
         self.badge_today.setAlignment(Qt.AlignCenter)
         row.addWidget(self.badge_today)
+        self.badge_login = QLabel("未登录")
+        self.badge_login.setObjectName("BadgeRed")
+        self.badge_login.setAlignment(Qt.AlignCenter)
+        self.badge_login.setToolTip("登录状态来自最近一次成功登录的记录；点「立即运行一次」可扫码登录")
+        row.addWidget(self.badge_login)
         row.addStretch(1)
         self.lbl_last = QLabel("上次运行：—")
         self.lbl_last.setObjectName("Hint")
         row.addWidget(self.lbl_last)
         c.body().addLayout(row)
+
+        # 新手引导条：从未成功登录过时显示，登录成功后自动消失
+        self.guide = QLabel(
+            "🧭 新手引导：① 点「立即运行一次」扫码登录  →  ② 添加好友备注  →  "
+            "③ 设定每日发送时间  →  ④ 点「注册自启任务」。登录成功后本提示自动消失。"
+        )
+        self.guide.setObjectName("GuideCard")
+        self.guide.setWordWrap(True)
+        self.guide.setAlignment(Qt.AlignCenter)
+        c.body().addWidget(self.guide)
 
     def _build_friends_card(self):
         c = self._card("好友昵称列表")
@@ -433,8 +453,6 @@ class SparkGUI(QMainWindow):
 
         self.chk_gpu = QCheckBox("启用 GPU 渲染（流畅；显卡跑模型时可关闭）")
         v.addWidget(self.chk_gpu)
-        self.chk_headless = QCheckBox("无头模式（隐藏浏览器窗口；不推荐，风控更高）")
-        v.addWidget(self.chk_headless)
         self.chk_random = QCheckBox("每日任务后自动随机明日发送时间（9:00-22:00）并更新定时任务")
         v.addWidget(self.chk_random)
         hint_r = QLabel("勾选后：每天任务执行完自动随机生成明天的发送时间并更新自启任务（删除自启任务则不再自动更新）。\n不勾选：固定使用上方设置的发送时间。")
@@ -524,7 +542,6 @@ class SparkGUI(QMainWindow):
         self.spin_dmax.setValue(int(d.get("max", 3.5)))
         self.spin_retry.setValue(int(self.cfg.get("retry", {}).get("max_attempts", 3)))
         self.chk_gpu.setChecked(bool(self.cfg.get("browser", {}).get("gpu", True)))
-        self.chk_headless.setChecked(bool(self.cfg.get("browser", {}).get("headless", False)))
         self.chk_random.setChecked(bool(self.cfg.get("randomize_time", False)))
 
     def _collect_config(self) -> dict:
@@ -537,7 +554,6 @@ class SparkGUI(QMainWindow):
         cfg["delays"]["max"] = float(self.spin_dmax.value())
         cfg["retry"]["max_attempts"] = int(self.spin_retry.value())
         cfg["browser"]["gpu"] = bool(self.chk_gpu.isChecked())
-        cfg["browser"]["headless"] = bool(self.chk_headless.isChecked())
         cfg["randomize_time"] = bool(self.chk_random.isChecked())
         return cfg
 
@@ -596,6 +612,37 @@ class SparkGUI(QMainWindow):
 
     # ---------- 事件 ----------
 
+    def _maybe_check_login_async(self):
+        """老用户升级校准：已有 config.yaml 但缺登录标记时，后台读一次本地 cookie
+        确认登录态并补写标记。新用户（无 config.yaml）不触发——他们本来就没登录过。
+        静默执行：失败一律忽略，不影响界面；若正在运行任务则跳过（避免争抢浏览器 profile）。"""
+        if os.path.exists(SESSION_MARK) or self._login_checking or self._running:
+            return
+        if not os.path.exists(CONFIG_PATH):
+            return
+        self._login_checking = True
+
+        def worker():
+            try:
+                from modules.login import launch, _is_logged_in, _mark_logged_in
+
+                prof = self.cfg.get("browser", {}).get("profile_dir", "data/profile")
+                if not os.path.isabs(prof):
+                    prof = os.path.join(APP_DIR, prof)
+                p, context = launch(prof, bool(self.cfg.get("browser", {}).get("gpu", True)))
+                try:
+                    if _is_logged_in(context):
+                        _mark_logged_in()
+                finally:
+                    context.close()
+                    p.stop()
+            except Exception:  # noqa: BLE001 - 静默失败：下次打开或任务运行时会自动校正
+                pass
+            finally:
+                self._login_checking = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _add_friend(self):
         name = self.edit_friend.text().strip()
         if not name:
@@ -625,6 +672,10 @@ class SparkGUI(QMainWindow):
 
     def _register_task(self):
         if not self._save_ui_config():
+            return
+        if not self.cfg.get("friends"):
+            QMessageBox.warning(self, "还没有添加好友",
+                                "请先在「好友昵称列表」中添加至少一位好友，再注册定时任务。")
             return
         t = self.cfg["send_time"]
         try:
@@ -715,6 +766,22 @@ class SparkGUI(QMainWindow):
         self.badge_today.setObjectName("BadgeGreen" if friends and done == len(friends) else "BadgeRed")
         self._restyle(self.badge_task)
         self._restyle(self.badge_today)
+        # 登录状态：以最近一次成功登录写入的标记为准
+        logged = os.path.exists(SESSION_MARK)
+        if logged:
+            try:
+                with open(SESSION_MARK, encoding="utf-8") as f:
+                    ts = f.read().strip()
+                self.badge_login.setToolTip(f"已登录（确认于 {ts}）")
+            except Exception:
+                self.badge_login.setToolTip("已登录")
+        else:
+            self.badge_login.setToolTip("尚未检测到登录记录；点「立即运行一次」扫码登录")
+        self.badge_login.setText("已登录" if logged else "未登录")
+        self.badge_login.setObjectName("BadgeGreen" if logged else "BadgeRed")
+        self._restyle(self.badge_login)
+        # 新手引导条：登录成功后自动消失
+        self.guide.setVisible(not logged)
 
     def _refresh_log(self):
         text = tail_log(LOG_PATH)
