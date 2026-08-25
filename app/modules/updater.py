@@ -1,21 +1,20 @@
 """软件内自更新模块：版本检测、资产下载、完整性校验、生成升级脚本并拉起。
 
 设计要点：
-- 版本源按序尝试：jsDelivr → raw.githubusercontent → GitHub API（各源独立超时），
-  任一成功即返回；全部失败返回 None（调用方静默放弃）。仓库根维护纯文本 VERSION 文件。
-- 资产命名规律固定：DY_SparkAutoKeeper_v{ver}_win64.zip，无需解析 release 元数据。
-- 下载候选 = 直连 + ghproxy 系镜像前缀逐个尝试；urllib 自动读取 Windows 注册表系统代理。
+- 网络层使用系统自带 curl.exe（Win10 1803+ 内置），彻底绕开 PyInstaller+conda
+  打包后 _ssl DLL 依赖损坏的问题（"unknown url type: https" / "DLL load failed"）。
+- 版本源按序尝试：GitHub API → jsDelivr → raw（各源独立超时）；仓库根维护 VERSION 文件。
+- 资产命名规律固定：DY_SparkAutoKeeper_v{ver}_win64.zip。
+- 下载候选 = 直连 + ghproxy 系镜像前缀逐个尝试；curl 自动遵循系统代理环境变量。
 - 完整性校验：zip 必含 app/app.exe 且首字节为 MZ（快速校验，不解压全量）。
 - 应用更新采用外部 PowerShell 脚本接力：等程序退出 → 旧 app.exe/_internal 改名留作回滚
-  → Expand-Archive 覆盖解压（zip 顶层即 app/，天然对位安装目录）→ 清理 → 可选重启。
+  → tar/Expand-Archive 覆盖解压（zip 顶层即 app/，天然对位安装目录）→ 清理 → 可选重启。
   数据目录（data/、config.yaml、logs/）不在包内，全程零接触。
 """
 import json
 import os
 import re
 import subprocess
-import urllib.request
-import zipfile
 
 REPO = "YHAz1/DY_SparkAutoKeeper"
 
@@ -25,15 +24,6 @@ _VERSION_SOURCES = [
 ]
 _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 
-
-def _candidate_sources(extra_sources: list = None) -> list:
-    """构建检测源候选序列。GitHub API 最权威且国内直连通常可达，放最前；
-    其后为 jsDelivr / raw 的 VERSION 文件源；extra_sources（测试用本地源）排最前。"""
-    sources = list(extra_sources or [])
-    sources.append(_API_LATEST)
-    sources += [s.format(repo=REPO) for s in _VERSION_SOURCES]
-    return sources
-
 _ASSET_TEMPLATE = "DY_SparkAutoKeeper_v{ver}_win64.zip"
 _MIRROR_PREFIXES = [
     "",  # 直连优先
@@ -41,8 +31,6 @@ _MIRROR_PREFIXES = [
     "https://gh-proxy.com/",
     "https://ghfast.top/",
 ]
-
-_UA = {"User-Agent": "DY_SparkAutoKeeper-updater"}
 
 _DEBUG_LOG = None  # 由 init_debug_log 注入路径
 
@@ -68,35 +56,24 @@ def _dbg(msg: str) -> None:
         pass
 
 
-def _open_url(url: str, timeout: int, direct: bool):
-    """direct=False：走系统代理设置（urllib 默认行为）；
-    direct=True：强制绕过任何代理直连。两种通道互为兜底。"""
-    import urllib.request as R
-
-    req = R.Request(url, headers=_UA)
-    if direct:
-        op = R.build_opener(R.ProxyHandler({}))
-        return op.open(req, timeout=timeout)
-    return R.urlopen(req, timeout=timeout)
+def _curl_path() -> str:
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.join(root, "System32", "curl.exe")
 
 
-def _read_url(url: str, timeout: int = 8) -> bytes:
-    """依次尝试：系统代理 → 强制直连。返回响应体。"""
-    errs = []
-    for direct in (False, True):
-        try:
-            with _open_url(url, timeout, direct) as resp:
-                body = resp.read()
-            _dbg(f"GET OK {'direct' if direct else 'sysproxy'} {url}")
-            return body
-        except Exception as e:  # noqa: BLE001
-            errs.append(f"{type(e).__name__}:{str(e)[:60]}({'direct' if direct else 'sysproxy'})")
-            _dbg(f"GET FAIL {url} -> {errs[-1]}")
-    raise RuntimeError(" | ".join(errs))
+def _curl_available() -> bool:
+    return os.path.exists(_curl_path())
+
+
+def _curl_run(args: list, timeout: int = 30):
+    """执行 curl，返回 (returncode, stdout_bytes, stderr_text)。"""
+    cmd = [_curl_path(), "-sS", "--ssl-no-revoke", *args]
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr.decode("utf-8", errors="replace")
 
 
 def parse_ver(text: str) -> tuple:
-    """'v1.3.0' / '1.3.0' / ' v1.3.0 \\n' → (1, 3, 0)；无法解析返回 ()。"""
+    """'v1.3.0' / '1.3.0' / ' v1.3.0\\n' → (1, 3, 0)；无法解析返回 ()。"""
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", str(text or ""))
     if not m:
         return ()
@@ -108,35 +85,39 @@ def is_newer(remote: str, local: str) -> bool:
     return bool(r) and bool(l) and r > l
 
 
-def _http_get(url: str, timeout: int = 6):
-    req = urllib.request.Request(url, headers=_UA)
-    return urllib.request.urlopen(req, timeout=timeout)
-
-
-def fetch_remote_version(timeout: int = 8, extra_sources: list = None) -> "str | None":
-    """按序尝试各版本源，返回形如 '1.3.0' 的版本号；全部失败返回 None。
-    extra_sources：测试用本地源（如 http://127.0.0.1:PORT/VERSION），排在最前。"""
-    _dbg(f"fetch_remote_version 开始，候选 {len(_candidate_sources(extra_sources))} 个")
-    for src in _candidate_sources(extra_sources):
-        try:
-            body = _read_url(src, timeout=timeout).decode("utf-8", errors="replace").strip()
-            if "api.github.com" in src:
-                tag = (json.loads(body) or {}).get("tag_name", "") or ""
-                mm = re.search(r"\d+\.\d+\.\d+", tag)
-                if mm:
-                    result = mm.group(0)
-                    _dbg(f"命中 API: {result}")
-                    return result
-                continue
-            ver = body.splitlines()[0].strip() if body else ""
-            if parse_ver(ver):
+def fetch_remote_version(timeout: int = 10, extra_sources: list = None) -> "str | None":
+    """按序尝试各版本源（curl 子进程，双协议兜底 --ssl-no-revoke/默认），
+    返回形如 '1.3.0' 的版本号；全部失败返回 None。"""
+    if not _curl_available():
+        _dbg("curl.exe 不可用")
+        return None
+    sources = list(extra_sources or [])
+    sources.append(_API_LATEST)
+    sources += [s.format(repo=REPO) for s in _VERSION_SOURCES]
+    _dbg(f"fetch 开始，候选 {len(sources)} 个")
+    for src in sources:
+        for tls in (["--ssl-no-revoke"], []):
+            try:
+                rc, body, err = _curl_run(["-m", str(timeout), src] + tls, timeout=timeout + 5)
+                if rc != 0:
+                    _dbg(f"GET FAIL {src} rc={rc} {err[:70]} (tls={bool(tls)})")
+                    continue
+                body = body.decode("utf-8", errors="replace").strip()
+                if "api.github.com" in src:
+                    tag = (json.loads(body) or {}).get("tag_name", "") or ""
+                    mm = re.search(r"\d+\.\d+\.\d+", tag)
+                    if mm:
+                        _dbg(f"命中 API: {mm.group(0)}")
+                        return mm.group(0)
+                    continue
+                ver = body.splitlines()[0].strip() if body else ""
                 mm = re.search(r"(\d+\.\d+\.\d+)", ver)
                 if mm:
-                    result = mm.group(1)
-                    _dbg(f"命中文件源: {result}")
-                    return result
-        except Exception as e:  # noqa: BLE001 - 单源失败换下一个
-            continue
+                    _dbg(f"命中文件源: {mm.group(1)}")
+                    return mm.group(1)
+            except Exception as e:  # noqa: BLE001
+                _dbg(f"GET EXC {src} {type(e).__name__}:{str(e)[:60]}")
+                continue
     _dbg("全部候选源失败")
     return None
 
@@ -148,52 +129,78 @@ def asset_urls(version: str, prefixes: list = None) -> list:
     prefixes = _MIRROR_PREFIXES if prefixes is None else prefixes
     seen, out = set(), []
     for p in prefixes:
-        u = p + direct
-        if u not in seen:
-            seen.add(u)
-            out.append(u)
+        url = p + direct
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
     return out
 
 
-def download(urls: list, dest_path: str, progress=None, chunk: int = 65536,
+def _content_length(url: str, timeout: int = 15) -> int:
+    try:
+        rc, body, err = _curl_run(["-sIL", "-m", str(timeout), url], timeout=timeout + 5)
+        if rc != 0:
+            return 0
+        text = body.decode("utf-8", errors="replace")
+        lengths = re.findall(r"(?i)content-length:\s*(\d+)", text)
+        return int(lengths[-1]) if lengths else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def download(urls: list, dest_path: str, progress=None,
              connect_timeout: int = 20) -> "str | None":
-    """依次尝试 urls（每源再按 系统代理/直连 双通道）下载到 dest_path。
-    progress(done, total)->bool，返回 False 表示用户请求取消。成功返回 dest_path。"""
+    """依次尝试 urls（curl -L 下载）到 dest_path。
+    progress(done, total)->bool，返回 False 表示用户请求取消。
+    成功返回 dest_path；全部失败返回 None。"""
+    if not _curl_available():
+        return None
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     for url in urls:
-        for direct in (False, True):
-            tmp = dest_path + ".part"
-            try:
-                with _open_url(url, connect_timeout, direct) as resp, open(tmp, "wb") as f:
-                    total = int(resp.headers.get("Content-Length") or 0)
-                    done = 0
-                    while True:
-                        block = resp.read(chunk)
-                        if not block:
-                            break
-                        f.write(block)
-                        done += len(block)
-                        if progress is not None and progress(done, total) is False:
-                            raise InterruptedError("用户取消下载")
-                    if total and done < total * 0.98:  # 异常截断视为失败换下一通道/源
-                        raise IOError(f"响应截断 {done}/{total}")
-                os.replace(tmp, dest_path)
+        part = dest_path + ".part"
+        total = _content_length(url, connect_timeout)
+        _dbg(f"DL 开始 {url} total={total}")
+        try:
+            proc = subprocess.Popen(
+                [_curl_path(), "-sS", "--ssl-no-revoke", "-L", "-o", part, url],
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
+            import time as _t
+
+            while proc.poll() is None:
+                _t.sleep(0.3)
+                done = os.path.getsize(part) if os.path.exists(part) else 0
+                if progress is not None and progress(done, total) is False:
+                    proc.kill()
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+                    raise InterruptedError("用户取消下载")
+            rc = proc.returncode
+            if rc == 0 and os.path.exists(part) and os.path.getsize(part) > 0:
+                os.replace(part, dest_path)
+                _dbg(f"DL OK {os.path.getsize(dest_path)}B")
                 return dest_path
-            except InterruptedError:
+            _dbg(f"DL FAIL rc={rc}")
+        except InterruptedError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            _dbg(f"DL EXC {type(e).__name__}:{str(e)[:80]}")
+        finally:
+            if os.path.exists(part) and not os.path.exists(dest_path):
                 try:
-                    os.remove(tmp)
+                    os.remove(part)
                 except OSError:
                     pass
-                raise
-            except Exception as e:  # noqa: BLE001 - 本通道失败换下一个
-                _dbg(f"DL FAIL {'direct' if direct else 'sysproxy'} {url} -> {type(e).__name__}:{str(e)[:80]}")
-                continue
     return None
 
 
 def verify_zip(path: str) -> bool:
     """快速完整性校验：能打开中央目录、包含 app/app.exe 且首两字节为 MZ。"""
     try:
+        import zipfile
+
         with zipfile.ZipFile(path) as z:
             names = z.namelist()
             if "app/app.exe" not in names:
@@ -207,7 +214,7 @@ def verify_zip(path: str) -> bool:
 
 def backup_user_files(install_dir: str) -> "str | None":
     """应用更新前快照小型用户文件到 data/_pre_update_backup/（data 目录升级全程零接触，
-    快照可长期保留作为恢复保险；_update_tmp 会在升级完成后被脚本清理，故不放这里）。"""
+    快照可长期保留作为恢复保险）。"""
     import shutil
 
     bdir = os.path.join(install_dir, "data", "_pre_update_backup")
