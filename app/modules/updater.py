@@ -168,10 +168,11 @@ def backup_user_files(install_dir: str) -> "str | None":
 
 
 def write_apply_script(install_dir: str, zip_path: str, restart: bool = True) -> str:
-    """生成升级接力脚本（UTF-8 BOM 的 PowerShell，兼容中文路径）。
-    流程：等程序退出 → 旧执行体改名留作回滚点 → 覆盖解压 → 成功清理 / 失败回滚 → 可选重启。"""
+    """生成升级接力脚本（UTF-8 BOM 的 PowerShell，兼容中文路径），保存在 zip 同目录。
+    流程：等程序退出 → 旧执行体改名留作回滚点 → 覆盖解压 → 成功清理 / 失败回滚 → 可选重启。
+    注意：脚本与 zip 必须放在安装目录之外（如系统临时目录），避免"运行中删除自身所在目录"。"""
     parent = os.path.dirname(install_dir)
-    ps_path = os.path.join(install_dir, "_update_tmp", "apply_update.ps1")
+    ps_path = os.path.join(os.path.dirname(zip_path), "apply_update.ps1")
 
     def q(p: str) -> str:
         return p.replace('"', '`"')
@@ -184,23 +185,30 @@ Start-Sleep -Seconds 2
 Rename-Item -LiteralPath (Join-Path $app "app.exe") -NewName "app.exe.bak" -ErrorAction SilentlyContinue
 Rename-Item -LiteralPath (Join-Path $app "_internal") -NewName "_internal.bak" -ErrorAction SilentlyContinue
 try {{
-    Expand-Archive -Force -Path $zip -DestinationPath $dest
+    # tar.exe（Win10 1803+ 内置）优先：对深层嵌套长路径更可靠
+    & "$env:SystemRoot\\System32\\tar.exe" -xf $zip -C $dest
+    if ($LASTEXITCODE -ne 0) {{ throw "tar exit $LASTEXITCODE" }}
 }} catch {{
-    if (Test-Path (Join-Path $app "app.exe.bak")) {{
-        if (Test-Path (Join-Path $app "app.exe")) {{ Remove-Item (Join-Path $app "app.exe") -Recurse -Force -ErrorAction SilentlyContinue }}
-        Rename-Item -LiteralPath (Join-Path $app "app.exe.bak") -NewName "app.exe"
+    try {{
+        Expand-Archive -Force -Path $zip -DestinationPath $dest
+    }} catch {{
+        if (Test-Path (Join-Path $app "app.exe.bak")) {{
+            if (Test-Path (Join-Path $app "app.exe")) {{ Remove-Item (Join-Path $app "app.exe") -Recurse -Force -ErrorAction SilentlyContinue }}
+            Rename-Item -LiteralPath (Join-Path $app "app.exe.bak") -NewName "app.exe"
+        }}
+        if (Test-Path (Join-Path $app "_internal.bak")) {{
+            if (Test-Path (Join-Path $app "_internal")) {{ Remove-Item (Join-Path $app "_internal") -Recurse -Force -ErrorAction SilentlyContinue }}
+            Rename-Item -LiteralPath (Join-Path $app "_internal.bak") -NewName "_internal"
+        }}
+        exit 1
     }}
-    if (Test-Path (Join-Path $app "_internal.bak")) {{
-        if (Test-Path (Join-Path $app "_internal")) {{ Remove-Item (Join-Path $app "_internal") -Recurse -Force -ErrorAction SilentlyContinue }}
-        Rename-Item -LiteralPath (Join-Path $app "_internal.bak") -NewName "_internal"
-    }}
-    exit 1
 }}
 Remove-Item -LiteralPath (Join-Path $app "app.exe.bak") -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $app "_internal.bak") -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $app "_update_tmp") -Recurse -Force -ErrorAction SilentlyContinue
 if ("{'true' if restart else 'false'}" -eq "true") {{ Start-Process -FilePath (Join-Path $app "app.exe") }}
+Remove-Item -LiteralPath "{q(ps_path)}" -Force -ErrorAction SilentlyContinue
+exit 0
 '''
     os.makedirs(os.path.dirname(ps_path), exist_ok=True)
     with open(ps_path, "w", encoding="utf-8-sig") as f:
