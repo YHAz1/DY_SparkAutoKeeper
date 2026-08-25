@@ -1,4 +1,4 @@
-﻿"""自动续火花 · 设置面板（PyQt5）
+"""自动续火花 · 设置面板（PyQt5）
 
 独立于任务运行：关闭此窗口不影响已注册的定时任务/开机自启。
 功能：好友管理、发送设置、高级设置、自启任务管理、手动运行、实时日志。
@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import datetime
 import json
@@ -306,6 +307,7 @@ class SparkGUI(QMainWindow):
         self._updating = False
         self._remote_version = None
         self._remote_done = False
+        self._check_gen = 0
         self._startup_update_check()
 
     # ---------- 界面构建 ----------
@@ -654,11 +656,15 @@ class SparkGUI(QMainWindow):
                 return
         except Exception:  # noqa: BLE001
             pass
-        threading.Thread(target=self._check_update_worker, args=(False,), daemon=True).start()
+        self._check_gen += 1; threading.Thread(target=self._check_update_worker, args=(self._check_gen,), daemon=True).start()
 
-    def _check_update_worker(self, manual: bool):
-        """后台线程：拉取远端版本号，结果写入 _remote_version/_remote_done。"""
+
+    def _check_update_worker(self, gen: int):
+        """后台线程：拉取远端版本号。gen 为本次检测代号，
+        期间用户再次触发检测会使代号递增，旧线程结果作废不写入。"""
         ver = upd.fetch_remote_version()
+        if gen != getattr(self, "_check_gen", 0):
+            return
         if ver:
             self._remote_version = ver
             try:
@@ -668,14 +674,11 @@ class SparkGUI(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
         self._remote_done = True
-        if manual:
-            self._manual_pending = manual
 
     def _begin_wait_remote(self):
         self.btn_check_update.setText("检测中…")
         self.btn_check_update.setEnabled(False)
-        self._remote_done = False
-        self._wait_deadline = time.time() + 25
+        self._wait_deadline = time.time() + 45
         self.timer_uwait = QTimer(self)
         self.timer_uwait.timeout.connect(self._poll_remote)
         self.timer_uwait.start(300)
@@ -686,14 +689,22 @@ class SparkGUI(QMainWindow):
         t = getattr(self, "timer_uwait", None)
         if t is not None:
             t.stop()
+        # 超时未完成且未重试过 → 静默自动重试一次（网络抖动容错）
+        if not self._remote_done and not getattr(self, "_retried", False) \
+                and not self._updating and not self._running:
+            self._retried = True
+            threading.Thread(target=self._check_update_worker,
+                             args=(getattr(self, "_check_gen", 0),), daemon=True).start()
+            self._wait_deadline = time.time() + 45
+            return
+        self._retried = False
         self.btn_check_update.setText("检查更新")
         self.btn_check_update.setEnabled(True)
         ver = self._remote_version
         timed_out = not self._remote_done
         if ver and upd.is_newer(ver, VERSION):
             self.lbl_update.setText(
-                f"🆕 发现新版本 v{ver}（当前 v{VERSION}）· 点击此处立即下载并自动更新"
-            )
+                f"发现新版本 v{ver}（当前 v{VERSION}）· 点击此处立即下载并自动更新")
             self.lbl_update.setVisible(True)
             return
         if getattr(self, "_manual_pending", False):
@@ -710,8 +721,13 @@ class SparkGUI(QMainWindow):
         if self._updating or self._running or getattr(self, "_login_checking", False):
             QMessageBox.information(self, "请稍候", "当前有任务或检测正在进行，稍后再试。")
             return
-        threading.Thread(target=self._check_update_worker, args=(True,), daemon=True).start()
+        self._check_gen = getattr(self, "_check_gen", 0) + 1
+        gen = self._check_gen
+        self._remote_version = None
+        self._remote_done = False
+        self._retried = False
         self._manual_pending = True
+        threading.Thread(target=self._check_update_worker, args=(gen,), daemon=True).start()
         self._begin_wait_remote()
 
     def _start_update_flow(self):
@@ -737,7 +753,7 @@ class SparkGUI(QMainWindow):
 
         self._updating = True
         self.lbl_update.setVisible(False)
-        dest_dir = os.path.join(APP_DIR, "_update_tmp")
+        dest_dir = os.path.join(tempfile.gettempdir(), "DY_SparkAutoKeeper_update")
         dest = os.path.join(dest_dir, f"DY_SparkAutoKeeper_v{ver}_win64.zip")
         state = {"done": 0, "total": 0, "cancel": False}
 

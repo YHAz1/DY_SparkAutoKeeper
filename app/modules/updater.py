@@ -25,6 +25,15 @@ _VERSION_SOURCES = [
 ]
 _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 
+
+def _candidate_sources(extra_sources: list = None) -> list:
+    """构建检测源候选序列。GitHub API 最权威且国内直连通常可达，放最前；
+    其后为 jsDelivr / raw 的 VERSION 文件源；extra_sources（测试用本地源）排最前。"""
+    sources = list(extra_sources or [])
+    sources.append(_API_LATEST)
+    sources += [s.format(repo=REPO) for s in _VERSION_SOURCES]
+    return sources
+
 _ASSET_TEMPLATE = "DY_SparkAutoKeeper_v{ver}_win64.zip"
 _MIRROR_PREFIXES = [
     "",  # 直连优先
@@ -54,13 +63,10 @@ def _http_get(url: str, timeout: int = 6):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def fetch_remote_version(timeout: int = 6, extra_sources: list = None) -> "str | None":
+def fetch_remote_version(timeout: int = 8, extra_sources: list = None) -> "str | None":
     """按序尝试各版本源，返回形如 '1.3.0' 的版本号；全部失败返回 None。
     extra_sources：测试用本地源（如 http://127.0.0.1:PORT/VERSION），排在最前。"""
-    sources = list(extra_sources or [])
-    sources += [s.format(repo=REPO) for s in _VERSION_SOURCES]
-    sources.append(_API_LATEST)
-    for src in sources:
+    for src in _candidate_sources(extra_sources):
         try:
             with _http_get(src, timeout=timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace").strip()
