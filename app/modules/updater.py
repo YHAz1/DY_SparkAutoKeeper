@@ -44,6 +44,56 @@ _MIRROR_PREFIXES = [
 
 _UA = {"User-Agent": "DY_SparkAutoKeeper-updater"}
 
+_DEBUG_LOG = None  # 由 init_debug_log 注入路径
+
+
+def init_debug_log(path: str) -> None:
+    """启用检测调试日志（GUI 启动时调用，写入安装目录 data/update_debug.log）。"""
+    global _DEBUG_LOG
+    _DEBUG_LOG = path
+
+
+def _dbg(msg: str) -> None:
+    if not _DEBUG_LOG:
+        return
+    try:
+        import time as _t
+
+        os.makedirs(os.path.dirname(_DEBUG_LOG), exist_ok=True)
+        if os.path.exists(_DEBUG_LOG) and os.path.getsize(_DEBUG_LOG) > 262144:
+            os.remove(_DEBUG_LOG)
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _open_url(url: str, timeout: int, direct: bool):
+    """direct=False：走系统代理设置（urllib 默认行为）；
+    direct=True：强制绕过任何代理直连。两种通道互为兜底。"""
+    import urllib.request as R
+
+    req = R.Request(url, headers=_UA)
+    if direct:
+        op = R.build_opener(R.ProxyHandler({}))
+        return op.open(req, timeout=timeout)
+    return R.urlopen(req, timeout=timeout)
+
+
+def _read_url(url: str, timeout: int = 8) -> bytes:
+    """依次尝试：系统代理 → 强制直连。返回响应体。"""
+    errs = []
+    for direct in (False, True):
+        try:
+            with _open_url(url, timeout, direct) as resp:
+                body = resp.read()
+            _dbg(f"GET OK {'direct' if direct else 'sysproxy'} {url}")
+            return body
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"{type(e).__name__}:{str(e)[:60]}({'direct' if direct else 'sysproxy'})")
+            _dbg(f"GET FAIL {url} -> {errs[-1]}")
+    raise RuntimeError(" | ".join(errs))
+
 
 def parse_ver(text: str) -> tuple:
     """'v1.3.0' / '1.3.0' / ' v1.3.0 \\n' → (1, 3, 0)；无法解析返回 ()。"""
@@ -66,20 +116,28 @@ def _http_get(url: str, timeout: int = 6):
 def fetch_remote_version(timeout: int = 8, extra_sources: list = None) -> "str | None":
     """按序尝试各版本源，返回形如 '1.3.0' 的版本号；全部失败返回 None。
     extra_sources：测试用本地源（如 http://127.0.0.1:PORT/VERSION），排在最前。"""
+    _dbg(f"fetch_remote_version 开始，候选 {len(_candidate_sources(extra_sources))} 个")
     for src in _candidate_sources(extra_sources):
         try:
-            with _http_get(src, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8", errors="replace").strip()
+            body = _read_url(src, timeout=timeout).decode("utf-8", errors="replace").strip()
             if "api.github.com" in src:
                 tag = (json.loads(body) or {}).get("tag_name", "") or ""
                 mm = re.search(r"\d+\.\d+\.\d+", tag)
-                return mm.group(0) if mm else None
+                if mm:
+                    result = mm.group(0)
+                    _dbg(f"命中 API: {result}")
+                    return result
+                continue
             ver = body.splitlines()[0].strip() if body else ""
             if parse_ver(ver):
                 mm = re.search(r"(\d+\.\d+\.\d+)", ver)
-                return mm.group(1) if mm else None
-        except Exception:  # noqa: BLE001 - 单源失败换下一个
+                if mm:
+                    result = mm.group(1)
+                    _dbg(f"命中文件源: {result}")
+                    return result
+        except Exception as e:  # noqa: BLE001 - 单源失败换下一个
             continue
+    _dbg("全部候选源失败")
     return None
 
 
@@ -99,42 +157,37 @@ def asset_urls(version: str, prefixes: list = None) -> list:
 
 def download(urls: list, dest_path: str, progress=None, chunk: int = 65536,
              connect_timeout: int = 20) -> "str | None":
-    """依次尝试 urls 下载到 dest_path。progress(done, total)->bool，
-    返回 False 表示用户请求取消（中止全部尝试）。成功返回 dest_path，失败返回 None。"""
+    """依次尝试 urls（每源再按 系统代理/直连 双通道）下载到 dest_path。
+    progress(done, total)->bool，返回 False 表示用户请求取消。成功返回 dest_path。"""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     for url in urls:
-        tmp = dest_path + ".part"
-        try:
-            req = urllib.request.Request(url, headers=_UA)
-            with urllib.request.urlopen(req, timeout=connect_timeout) as resp, open(tmp, "wb") as f:
-                total = int(resp.headers.get("Content-Length") or 0)
-                done = 0
-                while True:
-                    block = resp.read(chunk)
-                    if not block:
-                        break
-                    f.write(block)
-                    done += len(block)
-                    if progress is not None and progress(done, total) is False:
-                        raise InterruptedError("用户取消下载")
-            if total and done < total * 0.98:  # 异常截断视为失败换下一源
-                continue
-            os.replace(tmp, dest_path)
-            return dest_path
-        except InterruptedError:
+        for direct in (False, True):
+            tmp = dest_path + ".part"
             try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            raise
-        except Exception:  # noqa: BLE001 - 本源失败换下一个
-            continue
-        finally:
-            if os.path.exists(tmp) and not os.path.exists(dest_path):
+                with _open_url(url, connect_timeout, direct) as resp, open(tmp, "wb") as f:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    done = 0
+                    while True:
+                        block = resp.read(chunk)
+                        if not block:
+                            break
+                        f.write(block)
+                        done += len(block)
+                        if progress is not None and progress(done, total) is False:
+                            raise InterruptedError("用户取消下载")
+                    if total and done < total * 0.98:  # 异常截断视为失败换下一通道/源
+                        raise IOError(f"响应截断 {done}/{total}")
+                os.replace(tmp, dest_path)
+                return dest_path
+            except InterruptedError:
                 try:
                     os.remove(tmp)
                 except OSError:
                     pass
+                raise
+            except Exception as e:  # noqa: BLE001 - 本通道失败换下一个
+                _dbg(f"DL FAIL {'direct' if direct else 'sysproxy'} {url} -> {type(e).__name__}:{str(e)[:80]}")
+                continue
     return None
 
 

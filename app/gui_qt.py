@@ -304,6 +304,7 @@ class SparkGUI(QMainWindow):
         self._refresh_task_state()
 
         # 自更新状态：_remote_version/_remote_done 由后台线程写入，UI 定时轮询
+        upd.init_debug_log(os.path.join(APP_DIR, "data", "update_debug.log"))
         self._updating = False
         self._remote_version = None
         self._remote_done = False
