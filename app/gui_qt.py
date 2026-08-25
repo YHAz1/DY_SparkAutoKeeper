@@ -131,6 +131,7 @@ QScrollBar::handle:vertical { background: #E5D9CC; border-radius: 5px; min-heigh
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QLabel#BadgeGreen { color: #FFFFFF; background: #7FB77F; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
 QLabel#BadgeRed { color: #FFFFFF; background: #D98A8A; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
+QLabel#BadgeCheck { color: #FFFFFF; background: #E0A24E; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
 QLabel#GuideCard { background: #FFF4E2; color: #8A5A28; border: 1px solid #EFDCBB; border-radius: 10px; padding: 12px 16px; font-size: 16px; }
 QLabel#AboutText { color: #B5A99B; font-size: 14px; }
 """
@@ -289,11 +290,12 @@ class SparkGUI(QMainWindow):
         self.timer_task = QTimer(self)
         self.timer_task.timeout.connect(self._refresh_task_state)
         self.timer_task.start(8000)
-        self._refresh_task_state()
         self._refresh_log()
-        # 老用户升级场景：有配置但无登录标记 → 后台静默校准一次登录状态
+        # 老用户升级场景：有配置但无登录标记 → 后台静默校准（期间徽章显示检测动效）
+        # 先于首次 _refresh_task_state 调用，避免徽章先闪"未登录"再变检测中
         self._login_checking = False
         self._maybe_check_login_async()
+        self._refresh_task_state()
 
     # ---------- 界面构建 ----------
 
@@ -614,13 +616,17 @@ class SparkGUI(QMainWindow):
 
     def _maybe_check_login_async(self):
         """老用户升级校准：已有 config.yaml 但缺登录标记时，后台读一次本地 cookie
-        确认登录态并补写标记。新用户（无 config.yaml）不触发——他们本来就没登录过。
-        静默执行：失败一律忽略，不影响界面；若正在运行任务则跳过（避免争抢浏览器 profile）。"""
+        确认登录态并补写标记。检测期间徽章显示转圈"检测登录"动效。
+        新用户（无 config.yaml）不触发——他们本来就没登录过，直接落定未登录。
+        静默执行：失败一律忽略并按当前标记落定；若正在运行任务则跳过（避免争抢浏览器 profile）。"""
         if os.path.exists(SESSION_MARK) or self._login_checking or self._running:
+            self._settle_login_badge()
             return
         if not os.path.exists(CONFIG_PATH):
+            self._settle_login_badge()
             return
         self._login_checking = True
+        self._start_login_spinner()
 
         def worker():
             try:
@@ -636,12 +642,57 @@ class SparkGUI(QMainWindow):
                 finally:
                     context.close()
                     p.stop()
-            except Exception:  # noqa: BLE001 - 静默失败：下次打开或任务运行时会自动校正
+            except Exception:  # noqa: BLE001 - 静默失败：按当前标记落定，后续任务运行会自动校正
                 pass
             finally:
                 self._login_checking = False
+                self._settle_login_badge()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ---- 登录徽章动效 ----
+
+    _SPIN_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def _start_login_spinner(self):
+        """徽章进入检测中状态：琥珀色 + 转圈帧动画。"""
+        self._spin_idx = 0
+        self.badge_login.setObjectName("BadgeCheck")
+        self.badge_login.setToolTip("正在读取本地登录态…")
+        self.timer_spin = QTimer(self)
+        self.timer_spin.timeout.connect(self._spin_login_tick)
+        self.timer_spin.start(120)
+        self._spin_login_tick()
+
+    def _spin_login_tick(self):
+        frame = self._SPIN_FRAMES[self._spin_idx % len(self._SPIN_FRAMES)]
+        self._spin_idx += 1
+        self.badge_login.setText(f"{frame} 检测登录")
+        self._restyle(self.badge_login)
+
+    def _stop_login_spinner(self):
+        t = getattr(self, "timer_spin", None)
+        if t is not None:
+            t.stop()
+
+    def _settle_login_badge(self):
+        """检测结束（或无需检测）：按标记落定为已登录/未登录。"""
+        self._stop_login_spinner()
+        logged = os.path.exists(SESSION_MARK)
+        self.badge_login.setObjectName("BadgeGreen" if logged else "BadgeRed")
+        if logged:
+            try:
+                with open(SESSION_MARK, encoding="utf-8") as f:
+                    ts = f.read().strip()
+                self.badge_login.setToolTip(f"已登录（确认于 {ts}）")
+            except Exception:  # noqa: BLE001
+                self.badge_login.setToolTip("已登录")
+        else:
+            self.badge_login.setToolTip("尚未检测到登录记录；点「立即运行一次」扫码登录")
+        self.badge_login.setText("已登录" if logged else "未登录")
+        self._restyle(self.badge_login)
+        # 新手引导条：确认已登录后消失
+        self.guide.setVisible(not logged)
 
     def _add_friend(self):
         name = self.edit_friend.text().strip()
@@ -766,22 +817,9 @@ class SparkGUI(QMainWindow):
         self.badge_today.setObjectName("BadgeGreen" if friends and done == len(friends) else "BadgeRed")
         self._restyle(self.badge_task)
         self._restyle(self.badge_today)
-        # 登录状态：以最近一次成功登录写入的标记为准
-        logged = os.path.exists(SESSION_MARK)
-        if logged:
-            try:
-                with open(SESSION_MARK, encoding="utf-8") as f:
-                    ts = f.read().strip()
-                self.badge_login.setToolTip(f"已登录（确认于 {ts}）")
-            except Exception:
-                self.badge_login.setToolTip("已登录")
-        else:
-            self.badge_login.setToolTip("尚未检测到登录记录；点「立即运行一次」扫码登录")
-        self.badge_login.setText("已登录" if logged else "未登录")
-        self.badge_login.setObjectName("BadgeGreen" if logged else "BadgeRed")
-        self._restyle(self.badge_login)
-        # 新手引导条：登录成功后自动消失
-        self.guide.setVisible(not logged)
+        # 登录状态：检测进行中保持转圈动效；否则按标记落定显示
+        if not getattr(self, "_login_checking", False):
+            self._settle_login_badge()
 
     def _refresh_log(self):
         text = tail_log(LOG_PATH)
