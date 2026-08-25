@@ -11,9 +11,10 @@ import sys
 import threading
 import datetime
 import json
+import time
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QTimer, QUrl
+from PyQt5.QtGui import QFont, QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +27,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -35,6 +37,8 @@ from PyQt5.QtWidgets import (
 )
 
 import yaml
+
+from modules import updater as upd
 
 
 def _app_dir() -> str:
@@ -133,6 +137,7 @@ QLabel#BadgeGreen { color: #FFFFFF; background: #7FB77F; border-radius: 11px; pa
 QLabel#BadgeRed { color: #FFFFFF; background: #D98A8A; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
 QLabel#BadgeCheck { color: #FFFFFF; background: #E0A24E; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
 QLabel#GuideCard { background: #FFF4E2; color: #8A5A28; border: 1px solid #EFDCBB; border-radius: 10px; padding: 12px 16px; font-size: 16px; }
+QLabel#UpdateCard { background: #FDEBC8; color: #7A4A12; border: 2px solid #E0A24E; border-radius: 10px; padding: 14px 18px; font-size: 17px; font-weight: bold; }
 QLabel#AboutText { color: #B5A99B; font-size: 14px; }
 """
 
@@ -296,6 +301,12 @@ class SparkGUI(QMainWindow):
         self._login_checking = False
         self._maybe_check_login_async()
         self._refresh_task_state()
+
+        # 自更新状态：_remote_version/_remote_done 由后台线程写入，UI 定时轮询
+        self._updating = False
+        self._remote_version = None
+        self._remote_done = False
+        self._startup_update_check()
 
     # ---------- 界面构建 ----------
 
@@ -510,11 +521,22 @@ class SparkGUI(QMainWindow):
         c.body().addLayout(row)
 
     def _build_about(self, outer: QVBoxLayout):
-        """固定页脚：版本号 + 免责声明（始终可见），右下角署名。"""
+        """固定页脚：版本号 + 检查更新 + 免责声明（始终可见），右下角署名。"""
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("color: #F0E6DA;")
         outer.addWidget(line)
+
+        # 更新横幅：发现新版本时出现，点击立即更新
+        self.lbl_update = QLabel("")
+        self.lbl_update.setObjectName("UpdateCard")
+        self.lbl_update.setWordWrap(True)
+        self.lbl_update.setAlignment(Qt.AlignCenter)
+        self.lbl_update.setCursor(Qt.PointingHandCursor)
+        self.lbl_update.setVisible(False)
+        self.lbl_update.mousePressEvent = lambda e: self._start_update_flow()
+        outer.addWidget(self.lbl_update)
+
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(
@@ -525,6 +547,11 @@ class SparkGUI(QMainWindow):
         lbl.setObjectName("AboutText")
         lbl.setWordWrap(True)
         row.addWidget(lbl, 1)
+        self.btn_check_update = QPushButton("检查更新")
+        self.btn_check_update.setObjectName("Ghost")
+        self.btn_check_update.setToolTip("检测 GitHub 上的最新版本；发现新版可一键下载并自动应用")
+        self.btn_check_update.clicked.connect(self._manual_check_update)
+        row.addWidget(self.btn_check_update)
         owner = QLabel("YHAz")
         owner.setStyleSheet("color: rgba(160, 150, 140, 120); font-size: 14px; background: transparent;")
         owner.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -611,6 +638,184 @@ class SparkGUI(QMainWindow):
             return True
         QMessageBox.warning(self, "保存失败", "无法写入 config.yaml")
         return False
+
+    # ---------- 自更新 ----------
+
+    _UPDATE_MARK = os.path.join(APP_DIR, "data", "update_check.json")
+
+    def _startup_update_check(self):
+        """启动静默检测：每天最多一次，不弹任何提示；发现新版仅点亮页脚横幅。"""
+        try:
+            last = ""
+            if os.path.exists(self._UPDATE_MARK):
+                with open(self._UPDATE_MARK, encoding="utf-8") as f:
+                    last = (json.load(f) or {}).get("last", "")
+            if last == datetime.date.today().isoformat():
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        threading.Thread(target=self._check_update_worker, args=(False,), daemon=True).start()
+
+    def _check_update_worker(self, manual: bool):
+        """后台线程：拉取远端版本号，结果写入 _remote_version/_remote_done。"""
+        ver = upd.fetch_remote_version()
+        if ver:
+            self._remote_version = ver
+            try:
+                os.makedirs(os.path.dirname(self._UPDATE_MARK), exist_ok=True)
+                with open(self._UPDATE_MARK, "w", encoding="utf-8") as f:
+                    json.dump({"last": datetime.date.today().isoformat()}, f)
+            except Exception:  # noqa: BLE001
+                pass
+        self._remote_done = True
+        if manual:
+            self._manual_pending = manual
+
+    def _begin_wait_remote(self):
+        self.btn_check_update.setText("检测中…")
+        self.btn_check_update.setEnabled(False)
+        self._remote_done = False
+        self._wait_deadline = time.time() + 25
+        self.timer_uwait = QTimer(self)
+        self.timer_uwait.timeout.connect(self._poll_remote)
+        self.timer_uwait.start(300)
+
+    def _poll_remote(self):
+        if not self._remote_done and time.time() < getattr(self, "_wait_deadline", 0):
+            return
+        t = getattr(self, "timer_uwait", None)
+        if t is not None:
+            t.stop()
+        self.btn_check_update.setText("检查更新")
+        self.btn_check_update.setEnabled(True)
+        ver = self._remote_version
+        timed_out = not self._remote_done
+        if ver and upd.is_newer(ver, VERSION):
+            self.lbl_update.setText(
+                f"🆕 发现新版本 v{ver}（当前 v{VERSION}）· 点击此处立即下载并自动更新"
+            )
+            self.lbl_update.setVisible(True)
+            return
+        if getattr(self, "_manual_pending", False):
+            self._manual_pending = False
+            if timed_out or not ver:
+                QMessageBox.warning(self, "检查更新失败",
+                                    "无法连接版本服务器（GitHub）。\n"
+                                    "可稍后重试，或到 Releases 页面手动下载：\n"
+                                    f"https://github.com/{upd.REPO}/releases")
+            else:
+                QMessageBox.information(self, "检查更新", f"当前已是最新版本 v{VERSION}")
+
+    def _manual_check_update(self):
+        if self._updating or self._running or getattr(self, "_login_checking", False):
+            QMessageBox.information(self, "请稍候", "当前有任务或检测正在进行，稍后再试。")
+            return
+        threading.Thread(target=self._check_update_worker, args=(True,), daemon=True).start()
+        self._manual_pending = True
+        self._begin_wait_remote()
+
+    def _start_update_flow(self):
+        """点击更新横幅：确认 → 后台下载（进度条）→ 校验 → 快照用户文件 → 生成脚本并退出应用。"""
+        ver = self._remote_version
+        if not ver or self._updating:
+            return
+        if self._running:
+            QMessageBox.warning(self, "正在执行任务",
+                                "发送任务进行中，无法更新。\n请等待任务结束后再试。")
+            return
+        ret = QMessageBox.question(
+            self, "应用更新",
+            f"将下载 v{ver} 更新包（约 384MB），完成后会自动：\n"
+            "  · 关闭本程序与浏览器\n"
+            "  · 覆盖安装新版本（好友/时间/登录态/记录全部保留）\n"
+            "  · 自动重新启动程序\n\n"
+            "现在开始吗？（请确保网络可访问 GitHub 或其镜像）",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if ret != QMessageBox.Yes:
+            return
+
+        self._updating = True
+        self.lbl_update.setVisible(False)
+        dest_dir = os.path.join(APP_DIR, "_update_tmp")
+        dest = os.path.join(dest_dir, f"DY_SparkAutoKeeper_v{ver}_win64.zip")
+        state = {"done": 0, "total": 0, "cancel": False}
+
+        dlg = QProgressDialog("正在连接下载源…", "取消", 0, 1, self)
+        dlg.setWindowTitle("软件自更新")
+        dlg.setWindowModality(Qt.NonModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.resize(420, 90)
+
+        urls = upd.asset_urls(ver)
+
+        def worker():
+            def on_progress(done, total):
+                state["done"], state["total"] = done, total
+                return not state["cancel"]
+
+            ok = False
+            try:
+                ok = upd.download(urls, dest, progress=on_progress) is not None
+            except InterruptedError:
+                ok = False
+            state["finished"] = True
+            state["ok"] = ok
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll():
+            total = state.get("total") or 0
+            done = state.get("done") or 0
+            if state.get("finished"):
+                poll_t.stop()
+                dlg.cancel()
+                self._after_download(ver, dest, state.get("ok", False))
+                return
+            if total > 0:
+                if dlg.maximum() != total:
+                    dlg.setRange(0, total)
+                dlg.setValue(min(done, total))
+                dlg.setLabelText(f"正在下载更新包… {done / 1048576:.0f} / {total / 1048576:.0f} MB")
+            else:
+                dlg.setRange(0, 0)  # 忙碌指示
+            if state["cancel"]:
+                dlg.cancel()
+
+        poll_t = QTimer(self)
+        poll_t.timeout.connect(poll)
+        # 取消按钮 → 设置取消标志（worker 检测后中止）
+        dlg.canceled.connect(lambda: state.__setitem__("cancel", True))
+        poll_t.start(200)
+
+    def _after_download(self, ver: str, dest: str, ok: bool):
+        if not ok:
+            self._updating = False
+            ret = QMessageBox.warning(
+                self, "下载失败",
+                "所有下载源均失败或已取消。\n打开浏览器手动下载？",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if ret == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl(f"https://github.com/{upd.REPO}/releases"))
+            return
+        if not upd.verify_zip(dest):
+            self._updating = False
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            QMessageBox.warning(self, "更新包损坏", "下载的更新包校验未通过，已删除。\n请重试「检查更新」。")
+            return
+        upd.backup_user_files(APP_DIR)
+        ps1 = upd.write_apply_script(APP_DIR, dest, restart=True)
+        QMessageBox.information(
+            self, "准备完成",
+            "更新包已就绪并通过校验。\n点击确定后将关闭程序并自动应用更新（随后自动重启）。",
+        )
+        upd.launch_apply(ps1)
+        self.close()
 
     # ---------- 事件 ----------
 
