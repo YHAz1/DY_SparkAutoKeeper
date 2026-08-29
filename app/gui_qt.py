@@ -19,6 +19,7 @@ from PyQt5.QtGui import QFont, QDesktopServices, QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -831,8 +832,78 @@ class SparkGUI(QMainWindow):
         threading.Thread(target=self._check_update_worker, args=(gen,), daemon=True).start()
         self._begin_wait_remote()
 
-    def _start_update_flow(self):
-        """点击更新横幅：确认 → 后台下载（进度条）→ 校验 → 快照用户文件 → 生成脚本并退出应用。"""
+    # 下载源：(模式, 显示名)。mode 为 "auto"/"proxy"/镜像前缀
+    _UPDATE_SOURCES = [
+        ("auto", "自动（推荐：镜像优先，慢速自动换源）"),
+        ("proxy", "系统代理（直连 GitHub 并走系统代理）"),
+        ("https://gh.dpik.top/", "镜像 gh.dpik.top"),
+        ("https://gh-proxy.com/", "镜像 gh-proxy.com"),
+        ("https://cdn.gh-proxy.com/", "镜像 cdn.gh-proxy.com"),
+    ]
+    _UPDATE_SOURCE_MARK = os.path.join(APP_DIR, "data", "update_source.json")
+
+    def _pick_update_source(self) -> "str | None":
+        """下载源选择对话框，记住上次选择；取消返回 None。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("选择下载源")
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        tip = QLabel("下载慢可随时取消，换一个源重试。\n"
+                     "「自动」模式：镜像优先，速度过低会自动切换下一个源，无需手动干预。")
+        tip.setObjectName("Hint")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        combo = QComboBox()
+        last = "auto"
+        try:
+            with open(self._UPDATE_SOURCE_MARK, encoding="utf-8") as f:
+                last = (json.load(f) or {}).get("last", "auto")
+        except Exception:  # noqa: BLE001
+            pass
+        for i, (mode, label) in enumerate(self._UPDATE_SOURCES):
+            combo.addItem(label, mode)
+            if mode == last:
+                combo.setCurrentIndex(i)
+        lay.addWidget(combo)
+        row = QHBoxLayout()
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setObjectName("Ghost")
+        btn_ok = QPushButton("下一步")
+        row.addStretch(1)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_ok)
+        lay.addLayout(row)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+        return combo.currentData()
+
+    def _update_candidates(self, ver: str, mode: str) -> "list | None":
+        """按所选模式构造 [(url, proxy), ...] 下载候选。
+        mode 为镜像前缀时返回该镜像单候选；系统代理未开启返回 None 由调用方回退自动。"""
+        direct = upd.direct_url(ver)
+        if mode == "auto":
+            cands = [(m + direct, None) for m in (
+                "https://gh.dpik.top/", "https://gh-proxy.com/", "https://cdn.gh-proxy.com/")]
+            sp = upd.system_proxy()
+            if sp:
+                cands.append((direct, sp))
+            cands.append((direct, None))
+            cands.append(("https://ghfast.top/" + direct, None))
+            return cands
+        if mode == "proxy":
+            sp = upd.system_proxy()
+            if not sp:
+                QMessageBox.information(
+                    self, "未检测到系统代理",
+                    "系统当前未开启代理（Windows 设置 → 网络和 Internet → 代理）。\n已自动切换为「自动」模式。")
+                return self._update_candidates(ver, "auto")
+            return [(direct, sp)]
+        return [(mode + direct, None)]
+
+    def _start_update_flow(self, mode: "str | None" = None):
+        """点击更新横幅：选源 → 确认 → 后台下载（进度条）→ 校验 → 快照用户文件 → 脚本接力更新。"""
         ver = self._remote_version
         if not ver or self._updating:
             return
@@ -840,17 +911,28 @@ class SparkGUI(QMainWindow):
             QMessageBox.warning(self, "正在执行任务",
                                 "发送任务进行中，无法更新。\n请等待任务结束后再试。")
             return
+        if mode is None:
+            mode = self._pick_update_source()
+            if mode is None:
+                return
         ret = QMessageBox.question(
             self, "应用更新",
             f"将下载 v{ver} 更新包（约 384MB），完成后会自动：\n"
             "  · 关闭本程序与浏览器\n"
             "  · 覆盖安装新版本（好友/时间/登录态/记录全部保留）\n"
             "  · 自动重新启动程序\n\n"
-            "现在开始吗？（请确保网络可访问 GitHub 或其镜像）",
+            "现在开始吗？（下载慢可随时取消并更换下载源）",
             QMessageBox.Yes | QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
             return
+
+        try:
+            os.makedirs(os.path.dirname(self._UPDATE_SOURCE_MARK), exist_ok=True)
+            with open(self._UPDATE_SOURCE_MARK, "w", encoding="utf-8") as f:
+                json.dump({"last": mode}, f)
+        except Exception:  # noqa: BLE001
+            pass
 
         self._updating = True
         self.lbl_update.setVisible(False)
@@ -865,7 +947,7 @@ class SparkGUI(QMainWindow):
         dlg.setAutoClose(False)
         dlg.resize(420, 90)
 
-        urls = upd.asset_urls(ver)
+        candidates = self._update_candidates(ver, mode)
 
         def worker():
             def on_progress(done, total):
@@ -874,7 +956,8 @@ class SparkGUI(QMainWindow):
 
             ok = False
             try:
-                ok = upd.download(urls, dest, progress=on_progress) is not None
+                ok = upd.download(candidates, dest, progress=on_progress,
+                                  auto_switch=(mode == "auto")) is not None
             except InterruptedError:
                 ok = False
             state["finished"] = True
@@ -909,12 +992,17 @@ class SparkGUI(QMainWindow):
     def _after_download(self, ver: str, dest: str, ok: bool):
         if not ok:
             self._updating = False
-            ret = QMessageBox.warning(
-                self, "下载失败",
-                "所有下载源均失败或已取消。\n打开浏览器手动下载？",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if ret == QMessageBox.Yes:
+            box = QMessageBox(self)
+            box.setWindowTitle("下载失败")
+            box.setText("下载失败或已取消。\n可以换一个下载源重试，或到发布页手动下载。")
+            btn_retry = box.addButton("换个源重试", QMessageBox.YesRole)
+            btn_web = box.addButton("打开下载页", QMessageBox.NoRole)
+            box.addButton("取消", QMessageBox.RejectRole)
+            box.exec_()
+            clicked = box.clickedButton()
+            if clicked is btn_retry:
+                self._start_update_flow()
+            elif clicked is btn_web:
                 QDesktopServices.openUrl(QUrl(f"https://github.com/{upd.REPO}/releases"))
             return
         if not upd.verify_zip(dest):

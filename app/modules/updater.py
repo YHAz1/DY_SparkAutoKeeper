@@ -26,11 +26,74 @@ _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 
 _ASSET_TEMPLATE = "DY_SparkAutoKeeper_v{ver}_win64.zip"
 _MIRROR_PREFIXES = [
-    "",  # 直连优先
-    "https://mirror.ghproxy.com/",
+    "",  # 直连
+    "https://gh.dpik.top/",
     "https://gh-proxy.com/",
+    "https://cdn.gh-proxy.com/",
     "https://ghfast.top/",
 ]
+
+
+def system_proxy() -> "str | None":
+    """读取系统代理（WinINET 注册表设置，即"设置→网络→代理"里的那项）。
+    返回形如 http://127.0.0.1:26361 的地址；未开启返回 None。"""
+    try:
+        import winreg
+
+        k = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        enable, _ = winreg.QueryValueEx(k, "ProxyEnable")
+        server, _ = winreg.QueryValueEx(k, "ProxyServer")
+        winreg.CloseKey(k)
+        if not enable or not server:
+            return None
+        server = _normalize_proxy_server(str(server))
+        if server and not server.startswith("http"):
+            server = "http://" + server
+        return server or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _normalize_proxy_server(server: str) -> str:
+    """ProxyServer 可能是 '127.0.0.1:8080' 或 'http=...;https=...' 两种格式，
+    统一取出 host:port。仅做字符串处理，便于单测。"""
+    server = (server or "").strip()
+    if not server:
+        return ""
+    if ";" in server or "=" in server:
+        pick = ""
+        for part in server.split(";"):
+            if "=" in part:
+                scheme, _, val = part.partition("=")
+                if scheme.lower() in ("https", "http") and val:
+                    pick = val
+                    break
+            elif part.strip():
+                pick = part.strip()
+        server = pick
+    return server
+
+
+def direct_url(version: str) -> str:
+    """不带镜像前缀的 GitHub 直连下载地址。"""
+    name = _ASSET_TEMPLATE.format(ver=version)
+    return f"https://github.com/{REPO}/releases/download/v{version}/{name}"
+
+
+def asset_urls(version: str, prefixes: list = None) -> list:
+    """给定版本号，返回按优先级排列的下载地址列表（不带代理信息）。"""
+    direct = direct_url(version)
+    prefixes = _MIRROR_PREFIXES if prefixes is None else prefixes
+    seen, out = set(), []
+    for p in prefixes:
+        p = p if (not p or p.endswith("/")) else p + "/"
+        url = p + direct
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
 
 _DEBUG_LOG = None  # 由 init_debug_log 注入路径
 
@@ -118,27 +181,32 @@ def fetch_remote_version(timeout: int = 10, extra_sources: list = None) -> "str 
             except Exception as e:  # noqa: BLE001
                 _dbg(f"GET EXC {src} {type(e).__name__}:{str(e)[:60]}")
                 continue
+    # 兜底：全部直连失败且系统代理开启时，走系统代理再试一轮 API 源
+    sp = system_proxy()
+    if sp:
+        _dbg(f"直连全部失败，尝试系统代理 {sp}")
+        try:
+            rc, body, err = _curl_run(
+                ["-m", str(timeout), "-x", sp, _API_LATEST], timeout=timeout + 5)
+            if rc == 0:
+                tag = (json.loads(body.decode("utf-8", errors="replace")) or {}).get("tag_name", "")
+                mm = re.search(r"\d+\.\d+\.\d+", tag or "")
+                if mm:
+                    _dbg(f"命中 API(系统代理): {mm.group(0)}")
+                    return mm.group(0)
+        except Exception as e:  # noqa: BLE001
+            _dbg(f"GET EXC(proxy) {type(e).__name__}:{str(e)[:60]}")
     _dbg("全部候选源失败")
     return None
 
 
-def asset_urls(version: str, prefixes: list = None) -> list:
-    """给定版本号，返回按优先级排列的下载地址列表。"""
-    name = _ASSET_TEMPLATE.format(ver=version)
-    direct = f"https://github.com/{REPO}/releases/download/v{version}/{name}"
-    prefixes = _MIRROR_PREFIXES if prefixes is None else prefixes
-    seen, out = set(), []
-    for p in prefixes:
-        url = p + direct
-        if url not in seen:
-            seen.add(url)
-            out.append(url)
-    return out
-
-
-def _content_length(url: str, timeout: int = 15) -> int:
+def _content_length(url: str, timeout: int = 15, proxy: "str | None" = None) -> int:
     try:
-        rc, body, err = _curl_run(["-sIL", "-m", str(timeout), url], timeout=timeout + 5)
+        args = ["-sIL", "-m", str(timeout)]
+        if proxy:
+            args += ["-x", proxy]
+        args.append(url)
+        rc, body, err = _curl_run(args, timeout=timeout + 5)
         if rc != 0:
             return 0
         text = body.decode("utf-8", errors="replace")
@@ -148,25 +216,42 @@ def _content_length(url: str, timeout: int = 15) -> int:
         return 0
 
 
-def download(urls: list, dest_path: str, progress=None,
-             connect_timeout: int = 20) -> "str | None":
-    """依次尝试 urls（curl -L 下载）到 dest_path。
-    progress(done, total)->bool，返回 False 表示用户请求取消。
+def download(candidates: list, dest_path: str, progress=None,
+             connect_timeout: int = 20, auto_switch: bool = True,
+             min_speed_kb: int = 100, grace_sec: int = 20) -> "str | None":
+    """依次尝试各下载候选（元素为 url 或 (url, proxy) 元组，proxy 为 None 表示直连）
+    下载到 dest_path。progress(done, total)->bool，返回 False 表示用户请求取消。
+
+    auto_switch=True（自动模式）时带速度看护：每过 grace_sec 秒统计一次窗口速度，
+    低于 min_speed_kb 就果断掐掉当前候选、换下一个（"慢就取消选其他的"的自动版）；
+    手动指定单个源时调用方应传 auto_switch=False，尊重用户选择。
     成功返回 dest_path；全部失败返回 None。"""
-    if not _curl_available():
+    norm = []
+    for c in candidates or []:
+        url, proxy = c if isinstance(c, tuple) else (c, None)
+        if url and url not in [u for u, _ in norm]:
+            norm.append((url, proxy))
+    if not norm:
         return None
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    for url in urls:
+    for url, proxy in norm:
         part = dest_path + ".part"
-        total = _content_length(url, connect_timeout)
-        _dbg(f"DL 开始 {url} total={total}")
+        total = _content_length(url if not proxy else url, connect_timeout, proxy)
+        _dbg(f"DL 开始 {url} proxy={bool(proxy)} total={total}")
         try:
+            cmd = [_curl_path(), "-sS", "--ssl-no-revoke", "-f", "-L",
+                   "-o", part, "-w", "%{http_code}"]
+            if proxy:
+                cmd[1:1] = ["-x", proxy]
+            cmd.append(url)
             proc = subprocess.Popen(
-                [_curl_path(), "-sS", "--ssl-no-revoke", "-L", "-o", part, url],
+                cmd, stdout=subprocess.PIPE,
                 creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
             import time as _t
 
+            t_ref, d_ref = _t.monotonic(), 0
+            aborted_slow = False
             while proc.poll() is None:
                 _t.sleep(0.3)
                 done = os.path.getsize(part) if os.path.exists(part) else 0
@@ -177,12 +262,35 @@ def download(urls: list, dest_path: str, progress=None,
                     except OSError:
                         pass
                     raise InterruptedError("用户取消下载")
+                if auto_switch:
+                    now = _t.monotonic()
+                    span = now - t_ref
+                    if span >= grace_sec:
+                        speed = (done - d_ref) / span
+                        if speed < min_speed_kb * 1024:
+                            _dbg(f"DL 慢速 {speed / 1024:.0f}KB/s < {min_speed_kb}KB/s，切换下一候选")
+                            proc.kill()
+                            aborted_slow = True
+                            break
+                        t_ref, d_ref = now, done
+            if aborted_slow:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                continue
             rc = proc.returncode
-            if rc == 0 and os.path.exists(part) and os.path.getsize(part) > 0:
+            http_code = ""
+            try:
+                http_code = (proc.stdout.read() or b"").decode("ascii", errors="replace").strip()
+            except Exception:  # noqa: BLE001
+                pass
+            if rc == 0 and http_code in ("200", "206") and \
+                    os.path.exists(part) and os.path.getsize(part) > 0:
                 os.replace(part, dest_path)
                 _dbg(f"DL OK {os.path.getsize(dest_path)}B")
                 return dest_path
-            _dbg(f"DL FAIL rc={rc}")
+            _dbg(f"DL FAIL rc={rc} http={http_code}")
         except InterruptedError:
             raise
         except Exception as e:  # noqa: BLE001
