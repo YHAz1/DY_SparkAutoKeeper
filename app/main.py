@@ -55,6 +55,18 @@ def _session_mark() -> str:
     return SESSION_MARK
 
 
+def _clear_session_mark(log=None) -> None:
+    """清除可能已过期的登录标记：登录实际失败时调用，
+    让 GUI 徽章如实显示「未登录」并露出「扫码登录」按钮。"""
+    try:
+        if os.path.exists(SESSION_MARK):
+            os.remove(SESSION_MARK)
+            if log is not None:
+                log.info("已清除登录标记（.session_ok），面板将显示未登录")
+    except OSError:
+        pass
+
+
 _DEFAULT_CONFIG = {
     "send_time": "09:00",
     "friends": [],
@@ -177,6 +189,40 @@ def _parse_send_time(send_time: str) -> tuple:
     return 9, 0
 
 
+def _run_login_phase(cfg: dict, log) -> int:
+    """纯登录流程（--login，GUI「扫码登录」按钮调用）：只负责扫码登录并写登录标记，
+    不触发任何发送。返回退出码：0=登录成功。"""
+    lock = _acquire_lock()
+    if lock is None:
+        log.info("检测到发送任务正在运行，请稍后再点「扫码登录」")
+        return 1
+    try:
+        wait_min = float(cfg.get("network", {}).get("wait_timeout_min", 5))
+        if not notify.wait_for_network(log, wait_min):
+            log.error("网络不可用，无法登录")
+            _clear_session_mark(log)
+            return 1
+        try:
+            p, context = launch(
+                cfg["browser"]["profile_dir"], cfg["browser"].get("gpu", True))
+        except Exception as e:  # noqa: BLE001
+            log.error(f"浏览器启动失败：{e}")
+            _clear_session_mark(log)
+            return 1
+        try:
+            if ensure_logged_in(context, int(cfg["browser"].get("login_timeout_sec", 180))):
+                log.info("登录成功 ✔ 请回到面板添加好友并点「注册自启任务」")
+                return 0
+            log.error("登录未完成（等待扫码超时）")
+            _clear_session_mark(log)
+            return 1
+        finally:
+            context.close()
+            p.stop()
+    finally:
+        _release_lock(lock)
+
+
 def _send_all(cfg: dict, log, only=None) -> list:
     """执行发送流程：对 only（默认全部好友）中今天未发送的好友发送。
 
@@ -201,6 +247,7 @@ def _send_all(cfg: dict, log, only=None) -> list:
     try:
         if not ensure_logged_in(context, cfg["browser"]["login_timeout_sec"]):
             log.error("登录未完成，终止本次任务")
+            _clear_session_mark(log)
             return todo
 
         page = context.new_page()
@@ -410,6 +457,8 @@ def main(mode: str = "run") -> int:
 
     if mode == "remind":
         return _run_remind_phase(cfg, log)
+    if mode == "login":
+        return _run_login_phase(cfg, log)
 
     friends = cfg["friends"]
     if not friends:
@@ -467,6 +516,7 @@ def main(mode: str = "run") -> int:
             try:
                 if not ensure_logged_in(context, cfg["browser"]["login_timeout_sec"]):
                     log.error("登录未完成，终止本次任务")
+                    _clear_session_mark(log)
                     return 1
                 log.info("登录态已就绪 ✔ 请回到面板：① 添加好友备注 → ② 设定发送时间 → ③ 点「注册自启任务」")
                 return 0
@@ -486,5 +536,11 @@ def main(mode: str = "run") -> int:
 
 
 if __name__ == "__main__":
-    _mode = "remind" if "--remind" in [a.lower() for a in sys.argv[1:]] else "run"
+    _argv = [a.lower() for a in sys.argv[1:]]
+    if "--login" in _argv:
+        _mode = "login"
+    elif "--remind" in _argv:
+        _mode = "remind"
+    else:
+        _mode = "run"
     sys.exit(main(_mode))

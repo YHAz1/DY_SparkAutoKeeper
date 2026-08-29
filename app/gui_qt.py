@@ -63,7 +63,7 @@ from version import VERSION
 CREATE_NO_WINDOW = 0x08000000
 
 USAGE_TEXT = """【使用说明】
-1. 首次使用：点击「立即运行一次」，在弹出的浏览器中扫码登录你的账号；登录态保存在本机，之后自动复用
+1. 首次使用：未登录时点状态区的「扫码登录」按钮，在弹出的浏览器中扫码登录你的账号；登录态保存在本机，之后自动复用
 2. 好友列表：填入你对该好友的备注（需与对方有私信记录，会话列表可见）
 3. 发送设置：每日发送时间（HH:MM，如 09:00）；发送内容默认 [续火花吧]，输入后自动转为火花表情
 4. 点击「注册自启任务」：开机登录自动检查（完成即退出 / 未到点等待 / 错过补发），每日定时发送
@@ -385,7 +385,7 @@ class SparkGUI(QMainWindow):
         self.badge_login = QLabel("未登录")
         self.badge_login.setObjectName("BadgeRed")
         self.badge_login.setAlignment(Qt.AlignCenter)
-        self.badge_login.setToolTip("登录状态来自最近一次成功登录的记录；点「立即运行一次」可扫码登录")
+        self.badge_login.setToolTip("登录状态来自最近一次成功登录的记录；未登录时可点旁边「扫码登录」按钮")
         row.addWidget(self.badge_login)
         self.badge_task = QLabel("任务未注册")
         self.badge_task.setObjectName("BadgeRed")
@@ -395,6 +395,13 @@ class SparkGUI(QMainWindow):
         self.badge_today.setObjectName("BadgeRed")
         self.badge_today.setAlignment(Qt.AlignCenter)
         row.addWidget(self.badge_today)
+        # 未登录时显示的专用登录按钮（只执行扫码登录，成功后自动消失）
+        self.btn_login = QPushButton("扫码登录")
+        self.btn_login.setObjectName("Ghost")
+        self.btn_login.setToolTip("只执行登录：弹出浏览器扫码，成功后此按钮自动消失")
+        self.btn_login.clicked.connect(self._run_login_once)
+        self.btn_login.setVisible(False)
+        row.addWidget(self.btn_login)
         row.addStretch(1)
         self.lbl_last = QLabel("上次运行：—")
         self.lbl_last.setObjectName("Hint")
@@ -403,7 +410,7 @@ class SparkGUI(QMainWindow):
 
         # 新手引导条：从未成功登录过时显示，登录成功后自动消失
         self.guide = QLabel(
-            "🧭 新手引导：① 点「立即运行一次」扫码登录  →  ② 添加好友备注  →  "
+            "🧭 新手引导：① 点「扫码登录」完成登录  →  ② 添加好友备注  →  "
             "③ 设定每日发送时间  →  ④ 点「注册自启任务」。登录成功后本提示自动消失。"
         )
         self.guide.setObjectName("GuideCard")
@@ -1098,9 +1105,12 @@ class SparkGUI(QMainWindow):
             except Exception:  # noqa: BLE001
                 self.badge_login.setToolTip("已登录")
         else:
-            self.badge_login.setToolTip("尚未检测到登录记录；点「立即运行一次」扫码登录")
+            self.badge_login.setToolTip("尚未检测到登录记录；点上方「扫码登录」按钮登录")
         self.badge_login.setText("已登录" if logged else "未登录")
         self._restyle(self.badge_login)
+        # 未登录时露出「扫码登录」按钮；已登录（或检测中）隐藏
+        if hasattr(self, "btn_login"):
+            self.btn_login.setVisible(not logged)
         # 新手引导条：确认已登录后消失
         self.guide.setVisible(not logged)
 
@@ -1173,6 +1183,34 @@ class SparkGUI(QMainWindow):
             capture_output=True, timeout=90, creationflags=CREATE_NO_WINDOW,
         )
         self._refresh_task_state()
+
+    def _run_login_once(self):
+        """「扫码登录」按钮：只执行登录任务（--login），成功后按钮自动消失。"""
+        if getattr(self, "_login_running", False) or self._running:
+            return
+        self._login_running = True
+        self.btn_login.setText("登录中…")
+        self.btn_login.setEnabled(False)
+        threading.Thread(target=self._run_login_worker, daemon=True).start()
+
+    def _run_login_worker(self):
+        CREATE_NO_WINDOW = 0x08000000
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--login"]
+        else:
+            cmd = [get_env_python(), os.path.join(APP_DIR, "main.py"), "--login"]
+        try:
+            # 上限 7 分钟：浏览器启动 + 等网络 + 180s 扫码窗口
+            subprocess.run(cmd, cwd=APP_DIR, timeout=420, creationflags=CREATE_NO_WINDOW)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+        finally:
+            self._login_running = False
+            self.btn_login.setText("扫码登录")
+            self.btn_login.setEnabled(True)
+            self._refresh_task_state()
 
     def _run_once(self):
         if self._running:

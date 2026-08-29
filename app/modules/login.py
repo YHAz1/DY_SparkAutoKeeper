@@ -26,23 +26,67 @@ def _is_logged_in(context: BrowserContext) -> bool:
     return False
 
 
+def _kill_stale_browser(profile_dir: str) -> None:
+    """强杀占用本程序 profile 的残留浏览器/驱动进程。
+    按命令行中的 profile 路径精确匹配，不会误杀用户自己开的 Chrome。"""
+    try:
+        import subprocess
+
+        safe = str(profile_dir).replace("'", "''")
+        ps = (
+            "Get-CimInstance Win32_Process | Where-Object { "
+            f"$_.CommandLine -like '*{safe}*' -and "
+            "($_.Name -eq 'chrome.exe' -or $_.Name -eq 'headless_shell.exe' -or $_.Name -eq 'node.exe') } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        )
+    except Exception:  # noqa: BLE001 - 清理失败不阻塞主流程
+        pass
+
+
 def launch(profile_dir: str, gpu: bool = True) -> Tuple[object, BrowserContext]:
     """启动浏览器（持久化 profile，含登录 cookie）。返回 (playwright, context)。
     固定有头模式：无头模式在部分环境下易崩溃且风控更高，已移除该选项。
-    gpu=False 时禁用 GPU 渲染（纯软件渲染更慢但完全不占显卡，适合显卡正跑模型时）。"""
+    gpu=False 时禁用 GPU 渲染（纯软件渲染更慢但完全不占显卡，适合显卡正跑模型时）。
+
+    启动失败的自愈：① 清理占用 profile 的残留进程后重试；
+    ② 仍失败则把旧 profile 隔离为 profile.corrupt-时间戳（可手动找回），
+    用全新 profile 启动——避免 profile 损坏后软件永远无法登录。"""
     logger = get_logger()
     args = ["--disable-blink-features=AutomationControlled"]
     if not gpu:
         args.append("--disable-gpu")
     p = sync_playwright().start()
-    context = p.chromium.launch_persistent_context(
-        user_data_dir=profile_dir,
-        headless=False,
-        args=args,
-        locale="zh-CN",
-    )
-    logger.info(f"浏览器已启动（gpu={'开' if gpu else '关'}, profile={profile_dir}）")
-    return p, context
+    last_err: Exception = RuntimeError("browser launch failed")
+    for attempt in (1, 2, 3):
+        try:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                args=args,
+                locale="zh-CN",
+            )
+            logger.info(f"浏览器已启动（gpu={'开' if gpu else '关'}, profile={profile_dir}）")
+            return p, context
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logger.warning(f"浏览器启动失败（第 {attempt} 次）：{e}")
+            if attempt == 1:
+                _kill_stale_browser(profile_dir)
+            elif attempt == 2 and profile_dir and os.path.isdir(profile_dir):
+                quarantine = profile_dir.rstrip("/\\") + ".corrupt-" + time.strftime("%Y%m%d-%H%M%S")
+                try:
+                    os.rename(profile_dir, quarantine)
+                    logger.warning(
+                        f"登录配置疑似损坏，已隔离到 {quarantine}；本次将用全新配置启动，需重新扫码登录一次")
+                except OSError as re_err:
+                    logger.warning(f"隔离旧 profile 失败：{re_err}")
+    p.stop()
+    raise last_err
 
 
 def _mark_logged_in() -> None:

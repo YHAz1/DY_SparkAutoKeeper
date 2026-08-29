@@ -343,7 +343,9 @@ def backup_user_files(install_dir: str) -> "str | None":
 
 def write_apply_script(install_dir: str, zip_path: str, restart: bool = True) -> str:
     """生成升级接力脚本（UTF-8 BOM 的 PowerShell，兼容中文路径），保存在 zip 同目录。
-    流程：等程序退出 → 旧执行体改名留作回滚点 → 覆盖解压 → 成功清理 / 失败回滚 → 可选重启。
+    流程：等程序完全退出（最多 30s）→ 清理本程序残留的浏览器/驱动进程（释放 _internal
+    与 profile 占用，这是旧版"更新后登录态异常"的主因）→ 旧 app.exe/_internal 改名留作
+    回滚点 → 覆盖解压 → 校验关键文件齐全（不完整自动回滚）→ 清理 → 可选重启。
     注意：脚本与 zip 必须放在安装目录之外（如系统临时目录），避免"运行中删除自身所在目录"。"""
     parent = os.path.dirname(install_dir)
     ps_path = os.path.join(os.path.dirname(zip_path), "apply_update.ps1")
@@ -356,6 +358,32 @@ $zip  = "{q(zip_path)}"
 $dest = "{q(parent)}"
 $app  = "{q(install_dir)}"
 Start-Sleep -Seconds 2
+# 1) 等待主程序完全退出（最多 30 秒），避免文件占用导致"半更新"
+$deadline = (Get-Date).AddSeconds(30)
+while ((Get-Date) -lt $deadline) {{
+    $busy = Get-CimInstance Win32_Process -Filter "Name='app.exe'" |
+        Where-Object {{ $_.ExecutablePath -like "$app*" }}
+    if (-not $busy) {{ break }}
+    Start-Sleep -Milliseconds 500
+}}
+# 2) 清理本程序残留的浏览器/驱动进程（按安装路径精确匹配，不影响用户自己的 Chrome）
+Get-CimInstance Win32_Process |
+    Where-Object {{ $_.CommandLine -like "*$app*" -and
+                    ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'headless_shell.exe' -or $_.Name -eq 'node.exe') }} |
+    ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+Start-Sleep -Milliseconds 500
+
+function Rollback {{
+    if (Test-Path (Join-Path $app "app.exe.bak")) {{
+        if (Test-Path (Join-Path $app "app.exe")) {{ Remove-Item (Join-Path $app "app.exe") -Recurse -Force -ErrorAction SilentlyContinue }}
+        Rename-Item -LiteralPath (Join-Path $app "app.exe.bak") -NewName "app.exe" -ErrorAction SilentlyContinue
+    }}
+    if (Test-Path (Join-Path $app "_internal.bak")) {{
+        if (Test-Path (Join-Path $app "_internal")) {{ Remove-Item (Join-Path $app "_internal") -Recurse -Force -ErrorAction SilentlyContinue }}
+        Rename-Item -LiteralPath (Join-Path $app "_internal.bak") -NewName "_internal" -ErrorAction SilentlyContinue
+    }}
+}}
+
 Rename-Item -LiteralPath (Join-Path $app "app.exe") -NewName "app.exe.bak" -ErrorAction SilentlyContinue
 Rename-Item -LiteralPath (Join-Path $app "_internal") -NewName "_internal.bak" -ErrorAction SilentlyContinue
 try {{
@@ -366,16 +394,15 @@ try {{
     try {{
         Expand-Archive -Force -Path $zip -DestinationPath $dest
     }} catch {{
-        if (Test-Path (Join-Path $app "app.exe.bak")) {{
-            if (Test-Path (Join-Path $app "app.exe")) {{ Remove-Item (Join-Path $app "app.exe") -Recurse -Force -ErrorAction SilentlyContinue }}
-            Rename-Item -LiteralPath (Join-Path $app "app.exe.bak") -NewName "app.exe"
-        }}
-        if (Test-Path (Join-Path $app "_internal.bak")) {{
-            if (Test-Path (Join-Path $app "_internal")) {{ Remove-Item (Join-Path $app "_internal") -Recurse -Force -ErrorAction SilentlyContinue }}
-            Rename-Item -LiteralPath (Join-Path $app "_internal.bak") -NewName "_internal"
-        }}
+        Rollback
         exit 1
     }}
+}}
+# 3) 校验关键文件齐全（不完整说明解压被占用打断），不完整则回滚到旧版
+if (-not (Test-Path (Join-Path $app "app.exe")) -or
+    -not (Test-Path (Join-Path $app "_internal\\ms-playwright"))) {{
+    Rollback
+    exit 1
 }}
 Remove-Item -LiteralPath (Join-Path $app "app.exe.bak") -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $app "_internal.bak") -Recurse -Force -ErrorAction SilentlyContinue
