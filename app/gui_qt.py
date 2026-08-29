@@ -15,12 +15,13 @@ import json
 import time
 
 from PyQt5.QtCore import Qt, QTimer, QUrl
-from PyQt5.QtGui import QFont, QDesktopServices
+from PyQt5.QtGui import QFont, QDesktopServices, QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -55,7 +56,7 @@ LOG_PATH = os.path.join(APP_DIR, "logs", "app.log")
 SESSION_MARK = os.path.join(APP_DIR, "data", ".session_ok")
 TASK_NAME = "DYSparkAutoKeeper"
 PS_SCRIPT = os.path.join(APP_DIR, "scripts", "register_task.ps1")
-VERSION = "1.3.0"
+from version import VERSION
 
 # 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
 CREATE_NO_WINDOW = 0x08000000
@@ -65,7 +66,9 @@ USAGE_TEXT = """【使用说明】
 2. 好友列表：填入你对该好友的备注（需与对方有私信记录，会话列表可见）
 3. 发送设置：每日发送时间（HH:MM，如 09:00）；发送内容默认 [续火花吧]，输入后自动转为火花表情
 4. 点击「注册自启任务」：开机登录自动检查（完成即退出 / 未到点等待 / 错过补发），每日定时发送
-5. 运行日志：实时查看每次发送结果（app/logs/app.log）
+5. 远程提醒（可选）：在「远程提醒」卡片粘贴企业微信群机器人 Webhook 地址；每晚检查若当天未发送
+   成功，先自动补发一次，仍失败则在群里推送提醒（发送失败也会立即推送）
+6. 运行日志：实时查看每次发送结果（app/logs/app.log）
 
 【数据与存储】
 1. 登录态（含登录凭证）仅保存在本机 data/profile 目录，仅用于本程序自动登录
@@ -84,62 +87,70 @@ DISCLAIMER_TEXT = """【免责声明】
 8. 使用本工具即表示已阅读并同意以上全部条款"""
 
 QSS = """
-QWidget { font-family: "Microsoft YaHei"; font-size: 18px; color: #4A4238; }
-QMainWindow, #MainRoot { background: #FDF9F4; }
-QFrame#Card { background: #FFFFFF; border-radius: 14px; border: 1px solid #F2E8DC; }
-QLabel#CardTitle { font-size: 22px; font-weight: bold; color: #B06A3B; }
-QLabel#Hint { color: #A69A8A; font-size: 15px; }
+QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 17px; color: #4A4238; }
+QMainWindow, #MainRoot { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFBF7, stop:1 #F5EEE3); }
+QFrame#Card { background: #FFFFFF; border-radius: 16px; border: 1px solid #F1E7D9; }
+QLabel#CardTitle { font-size: 20px; font-weight: 600; color: #A9602E; }
+QLabel#Hint { color: #A89B8B; font-size: 15px; }
 QPushButton {
-    background: #E8935A; color: #FFFFFF; border: none; border-radius: 10px;
-    padding: 14px 30px; font-size: 18px;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F19A5D, stop:1 #E07F3C);
+    color: #FFFFFF; border: none; border-radius: 11px;
+    padding: 12px 28px; font-size: 17px; font-weight: 600;
 }
-QPushButton:hover { background: #D97F43; }
-QPushButton:pressed { background: #C96E35; }
-QPushButton:disabled { background: #EBD3BC; color: #FFFFFF; }
+QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E88F4F, stop:1 #D67433); }
+QPushButton:pressed { background: #C9672C; }
+QPushButton:disabled { background: #EBD5BE; color: #FFFFFF; }
 QPushButton#Ghost {
-    background: #FFFFFF; color: #B06A3B; border: 1px solid #E5C9B0;
+    background: #FFFFFF; color: #B06A3B; border: 1px solid #E8CDB2; font-weight: normal;
 }
-QPushButton#Ghost:hover { background: #FBF1E7; }
-QPushButton#Danger { background: #E7B8A8; }
-QPushButton#Danger:hover { background: #DD9C88; }
+QPushButton#Ghost:hover { background: #FBF2E7; }
+QPushButton#Danger { background: #E2937A; }
+QPushButton#Danger:hover { background: #D97F62; }
 QLineEdit {
-    background: #FFFDF9; border: 1px solid #E5D9CC; border-radius: 8px;
-    padding: 12px 16px; selection-background-color: #F3C9A4; font-size: 18px;
+    background: #FFFEFB; border: 1px solid #EBDFD0; border-radius: 9px;
+    padding: 10px 14px; selection-background-color: #F3C9A4; font-size: 17px;
 }
-QLineEdit:focus { border: 1px solid #E8935A; }
+QLineEdit:focus { border: 1px solid #E8935A; background: #FFF9F1; }
 QListWidget {
-    background: #FFFDF9; border: 1px solid #E5D9CC; border-radius: 9px;
-    padding: 6px; font-size: 18px;
+    background: #FFFEFB; border: 1px solid #EBDFD0; border-radius: 10px;
+    padding: 6px; font-size: 17px;
 }
-QListWidget::item { padding: 10px 12px; border-radius: 6px; }
-QListWidget::item:selected { background: #F8E3D0; color: #7A4A22; }
+QListWidget::item { padding: 9px 12px; border-radius: 7px; margin: 1px 0; }
+QListWidget::item:hover { background: #FBF4EA; }
+QListWidget::item:selected { background: #F7E4CF; color: #7A4A22; }
 QPlainTextEdit {
-    background: #FFFDF9; border: 1px solid #E5D9CC; border-radius: 9px;
-    font-family: "Consolas"; font-size: 15px; color: #4A4238;
+    background: #FFFDF9; border: 1px solid #EFE5D6; border-radius: 10px;
+    font-family: "Consolas"; font-size: 15px; color: #6B5D4F;
 }
 QSpinBox {
-    background: #FFFDF9; border: 1px solid #E5D9CC; border-radius: 7px;
-    padding: 9px 14px; font-size: 18px;
+    background: #FFFEFB; border: 1px solid #EBDFD0; border-radius: 8px;
+    padding: 8px 12px; font-size: 17px;
 }
-QCheckBox { spacing: 10px; font-size: 18px; }
+QCheckBox { spacing: 9px; font-size: 17px; }
 QCheckBox::indicator {
-    width: 20px; height: 20px; border-radius: 5px;
-    border: 1px solid #E5C9B0; background: #FFFDF9;
+    width: 19px; height: 19px; border-radius: 6px;
+    border: 1px solid #DFC4A6; background: #FFFEFB;
 }
-QCheckBox::indicator:checked { background: #E8935A; border-color: #E8935A; }
-QToolButton#FoldBtn { background: transparent; color: #B06A3B; border: none; font-weight: bold; font-size: 18px; }
-QToolButton#FoldBtn:hover { color: #D97F43; }
+QCheckBox::indicator:hover { border-color: #E8935A; }
+QCheckBox::indicator:checked {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F19A5D, stop:1 #E07F3C);
+    border-color: #E07F3C;
+}
+QToolButton#FoldBtn { background: transparent; color: #B0764A; border: none; font-weight: 600; font-size: 16px; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
-QScrollBar:vertical { background: transparent; width: 10px; }
-QScrollBar::handle:vertical { background: #E5D9CC; border-radius: 5px; min-height: 24px; }
+QScrollBar:vertical { background: transparent; width: 9px; margin: 2px 0; }
+QScrollBar::handle:vertical { background: #E4D7C5; border-radius: 4px; min-height: 28px; }
+QScrollBar::handle:vertical:hover { background: #D7C6B0; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QLabel#BadgeGreen { color: #FFFFFF; background: #7FB77F; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
-QLabel#BadgeRed { color: #FFFFFF; background: #D98A8A; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
-QLabel#BadgeCheck { color: #FFFFFF; background: #E0A24E; border-radius: 11px; padding: 7px 20px; font-size: 16px; }
-QLabel#GuideCard { background: #FFF4E2; color: #8A5A28; border: 1px solid #EFDCBB; border-radius: 10px; padding: 12px 16px; font-size: 16px; }
-QLabel#UpdateCard { background: #FDEBC8; color: #7A4A12; border: 2px solid #E0A24E; border-radius: 10px; padding: 14px 18px; font-size: 17px; font-weight: bold; }
-QLabel#AboutText { color: #B5A99B; font-size: 14px; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QLabel#BadgeGreen { color: #FFFFFF; background: #74AC74; border-radius: 12px; padding: 7px 19px; font-size: 16px; font-weight: 600; }
+QLabel#BadgeRed { color: #FFFFFF; background: #D67F76; border-radius: 12px; padding: 7px 19px; font-size: 16px; font-weight: 600; }
+QLabel#BadgeCheck { color: #FFFFFF; background: #DE9A44; border-radius: 12px; padding: 7px 19px; font-size: 16px; font-weight: 600; }
+QLabel#GuideCard { background: #FFF6E6; color: #8A5A28; border: 1px solid #F0DDC0; border-radius: 11px; padding: 11px 14px; font-size: 15px; }
+QLabel#UpdateCard { background: #FDF0D5; color: #7A4A12; border: 1px solid #E5B04C; border-radius: 11px; padding: 13px 16px; font-size: 16px; font-weight: 600; }
+QLabel#AboutText { color: #B7AA9B; font-size: 13px; }
+QToolTip { background: #FFF9F1; color: #7A6A58; border: 1px solid #E8D3B8; padding: 6px 8px; font-size: 14px; }
 """
 
 
@@ -153,6 +164,13 @@ def load_config() -> dict:
         "randomize_time": False,
         "delays": {"min": 1.5, "max": 3.5},
         "retry": {"max_attempts": 3, "interval_sec": 10},
+        "notify": {
+            "webhook_url": "",
+            "remind_time": "22:30",
+            "auto_resend": True,
+            "notify_on_fail": True,
+            "mention_all": True,
+        },
         "browser": {"gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
         "log": {"dir": "logs", "keep_days": 30},
     }
@@ -224,12 +242,19 @@ class Card(QFrame):
         super().__init__(parent)
         self.setObjectName("Card")
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(16, 12, 16, 14)
+        self._layout.setContentsMargins(18, 14, 18, 15)
         self._layout.setSpacing(8)
         if title:
-            lbl = QLabel(title)
+            # 标题前的小装饰条：给分区一点视觉锚点
+            lbl = QLabel(f"<span style='color:#E8935A;'>▎</span>&nbsp;{title}")
             lbl.setObjectName("CardTitle")
             self._layout.addWidget(lbl)
+        # 柔和暖色投影：让白卡片从渐变底上轻微"浮起"
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 5)
+        shadow.setColor(QColor(186, 148, 100, 36))
+        self.setGraphicsEffect(shadow)
 
     def body(self) -> QVBoxLayout:
         return self._layout
@@ -254,7 +279,11 @@ class NoticeDialog(QDialog):
         lay.addWidget(title)
         body = QPlainTextEdit()
         body.setReadOnly(True)
-        body.setFont(QFont("Microsoft YaHei", 21))
+        body.setFont(QFont("Microsoft YaHei UI", 16))
+        # 内联样式覆盖全局 QSS 的等宽字体，公告正文用正文字体更协调
+        body.setStyleSheet(
+            "QPlainTextEdit { background:#FFFFFF; border:1px solid #F0E6D8; "
+            "font-family:'Microsoft YaHei UI'; font-size:17px; color:#5A4F42; }")
         body.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         body.setPlainText(USAGE_TEXT + "\n\n" + DISCLAIMER_TEXT)
         body.setMinimumHeight(430)
@@ -336,6 +365,7 @@ class SparkGUI(QMainWindow):
         self._build_friends_card()
         self._build_send_card()
         self._build_advanced_card()
+        self._build_notify_card()
         self._build_task_card()
         self._build_log_card()
 
@@ -481,6 +511,43 @@ class SparkGUI(QMainWindow):
         btn_fold.toggled.connect(lambda on: (inner.setVisible(on),
                                              btn_fold.setText("收起设置  ▴" if on else "展开设置  ▾")))
 
+    def _build_notify_card(self):
+        c = self._card("远程提醒（企业微信群机器人）")
+        v = c.body()
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("每晚检查时间"))
+        self.edit_remind_time = QLineEdit()
+        self.edit_remind_time.setPlaceholderText("如 22:30")
+        self.edit_remind_time.setFixedWidth(110)
+        row.addWidget(self.edit_remind_time)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.edit_webhook = QLineEdit()
+        self.edit_webhook.setPlaceholderText(
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…（留空=不推送）")
+        v.addWidget(self.edit_webhook)
+
+        self.chk_auto_resend = QCheckBox("晚间检查时先自动补发一次（当天错过也能抢救）")
+        self.chk_auto_resend.setChecked(True)
+        v.addWidget(self.chk_auto_resend)
+        self.chk_notify_fail = QCheckBox("当天发送最终失败时立即推送通知")
+        self.chk_notify_fail.setChecked(True)
+        v.addWidget(self.chk_notify_fail)
+        self.chk_mention_all = QCheckBox("提醒消息在群里 @所有人")
+        self.chk_mention_all.setChecked(True)
+        v.addWidget(self.chk_mention_all)
+
+        hint_n = QLabel(
+            "获取方式：企业微信群 → 右键群 → 添加群机器人 → 查看机器人 → 复制 Webhook 地址。\n"
+            "逻辑：每晚「检查时间」若今天还没发送成功 → 先自动补发，仍失败才推送群提醒；"
+            "发送任务最终失败时也会立即推送。检查时间要晚于发送时间最大可能值"
+            "（随机区间上限 22:00，建议 22:00 以后，默认 22:30）。保存后需重新注册自启任务生效。")
+        hint_n.setObjectName("Hint")
+        hint_n.setWordWrap(True)
+        v.addWidget(hint_n)
+
     def _build_task_card(self):
         c = self._card("开机自启 + 定时任务")
         row = QHBoxLayout()
@@ -496,7 +563,8 @@ class SparkGUI(QMainWindow):
         btn_run.clicked.connect(self._run_once)
         row.addWidget(btn_run)
         c.body().addLayout(row)
-        hint = QLabel("注册后：开机登录自动检查（完成即退出 / 未到点等待 / 错过补发）+ 每日定时兜底。")
+        hint = QLabel("注册后：开机登录自动检查（完成即退出 / 未到点等待 / 错过补发）+ 每日定时兜底"
+                      "+ 每晚提醒检查（未发成功先自动补发，再推企业微信群提醒，见「远程提醒」卡片）。")
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         c.body().addWidget(hint)
@@ -575,6 +643,12 @@ class SparkGUI(QMainWindow):
         self.spin_retry.setValue(int(self.cfg.get("retry", {}).get("max_attempts", 3)))
         self.chk_gpu.setChecked(bool(self.cfg.get("browser", {}).get("gpu", True)))
         self.chk_random.setChecked(bool(self.cfg.get("randomize_time", False)))
+        n = self.cfg.get("notify", {})
+        self.edit_remind_time.setText(str(n.get("remind_time", "22:30")))
+        self.edit_webhook.setText(str(n.get("webhook_url", "") or ""))
+        self.chk_auto_resend.setChecked(bool(n.get("auto_resend", True)))
+        self.chk_notify_fail.setChecked(bool(n.get("notify_on_fail", True)))
+        self.chk_mention_all.setChecked(bool(n.get("mention_all", True)))
 
     def _collect_config(self) -> dict:
         """从界面收集配置（不做写盘）。"""
@@ -587,6 +661,13 @@ class SparkGUI(QMainWindow):
         cfg["retry"]["max_attempts"] = int(self.spin_retry.value())
         cfg["browser"]["gpu"] = bool(self.chk_gpu.isChecked())
         cfg["randomize_time"] = bool(self.chk_random.isChecked())
+        cfg["notify"] = {
+            "webhook_url": self.edit_webhook.text().strip(),
+            "remind_time": self.edit_remind_time.text().strip() or "22:30",
+            "auto_resend": bool(self.chk_auto_resend.isChecked()),
+            "notify_on_fail": bool(self.chk_notify_fail.isChecked()),
+            "mention_all": bool(self.chk_mention_all.isChecked()),
+        }
         return cfg
 
     def _random_time(self):
@@ -636,6 +717,25 @@ class SparkGUI(QMainWindow):
             )
             return False
         self.edit_time.setText(norm)  # 回填纠正后的标准格式
+        rnorm = self._normalize_time(self.edit_remind_time.text())
+        if not rnorm:
+            QMessageBox.warning(
+                self,
+                "提醒时间格式错误",
+                f"无法识别的提醒时间输入:{self.edit_remind_time.text().strip()!r}\n"
+                "小时 0-23、分钟 0-59，例如 22:30。\n"
+                "提醒时间应晚于发送时间最大可能值（随机区间上限 22:00）。",
+            )
+            return False
+        self.edit_remind_time.setText(rnorm)
+        webhook = self.edit_webhook.text().strip()
+        if webhook and not webhook.lower().startswith(("http://", "https://")):
+            QMessageBox.warning(
+                self, "Webhook 地址不合法",
+                "Webhook 地址应以 https:// 开头。\n"
+                "企业微信机器人地址形如：\n"
+                "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…")
+            return False
         self._collect_config()
         if save_config(self.cfg):
             return True
@@ -951,10 +1051,11 @@ class SparkGUI(QMainWindow):
                                 "请先在「好友昵称列表」中添加至少一位好友，再注册定时任务。")
             return
         t = self.cfg["send_time"]
+        rt = self.cfg.get("notify", {}).get("remind_time", "22:30")
         try:
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                 "-File", PS_SCRIPT, "-Time", t],
+                 "-File", PS_SCRIPT, "-Time", t, "-RemindTime", rt],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90,
                 creationflags=CREATE_NO_WINDOW,
             )
@@ -965,7 +1066,8 @@ class SparkGUI(QMainWindow):
         QMessageBox.information(
             self,
             "注册成功" if ok else "注册失败",
-            (f"已注册开机自启 + 每日 {t} 定时任务（错过自动补发）" if ok
+            (f"已注册开机自启 + 每日 {t} 定时任务（错过自动补发）\n"
+             f"每晚 {rt} 提醒检查：未发送成功先自动补发，仍失败推送企业微信提醒" if ok
              else (r.stderr or r.stdout or "未知错误")[:400]),
         )
         self._refresh_task_state()
@@ -1001,7 +1103,8 @@ class SparkGUI(QMainWindow):
         else:
             cmd = [get_env_python(), os.path.join(APP_DIR, "main.py")]
         try:
-            subprocess.run(cmd, cwd=APP_DIR, timeout=1800, creationflags=CREATE_NO_WINDOW)
+            # 上限 60 分钟：网络等待 + 发送 + 失败重试窗口都算在内
+            subprocess.run(cmd, cwd=APP_DIR, timeout=3600, creationflags=CREATE_NO_WINDOW)
         except Exception as e:
             import traceback
 
@@ -1077,7 +1180,7 @@ def main():
         pass
 
     app = QApplication(sys.argv)
-    app.setFont(QFont("Microsoft YaHei", 14))
+    app.setFont(QFont("Microsoft YaHei UI", 10))
 
     # 单实例：必须在 QApplication 创建之后（QSharedMemory 依赖 QCoreApplication）
     # 重复启动时激活已有窗口并退出，不允许多开

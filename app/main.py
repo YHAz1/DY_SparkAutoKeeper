@@ -5,8 +5,16 @@
 2. 计算今天未发送的好友；若全部完成 → 直接退出
 3. 若未到发送时间 → 等待到点后再发送
 4. 若已过发送时间 → 立即补发
+5. 发送前等待网络可用（睡眠唤醒后 Wi-Fi 重连慢的场景）；单轮失败立即推送
+   企业微信提醒。失败后不靠进程内轮询重试：register_task.ps1 为主任务订阅了
+   Windows"网络已连接"事件（NetworkProfile/Operational 10000），网络一恢复
+   系统就会自动拉起本程序补发（今天已发则秒退）；晚间提醒任务（--remind）再兜底。
+6. --remind：晚间提醒任务（计划程序每日触发）。今日仍未发送成功 →
+   先自动补发一次，仍失败则推送企业微信群机器人提醒到群里。
+   提醒时间应晚于随机时间区间上限（随机区间 9:00-22:00，默认提醒 22:30）。
 """
 import datetime
+import json
 import os
 import random
 import subprocess
@@ -17,7 +25,8 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from modules import sender, state
+from version import VERSION
+from modules import sender, state, notify
 from modules.logger import init_logger, get_logger
 from modules.login import ensure_logged_in, launch
 
@@ -32,6 +41,13 @@ def _app_dir() -> str:
 APP_DIR = _app_dir()
 LOCK_PATH = os.path.join(APP_DIR, "data", "run.lock")
 SESSION_MARK = os.path.join(APP_DIR, "data", ".session_ok")
+RUN_FILE = os.path.join(APP_DIR, "data", "last_run.json")
+
+# 晚间提醒任务的时间闸门：计划发送时间过后再等这么久才算"确定没发出去"，
+# 避免提醒任务比发送任务先醒、误报"未发送"
+_REMIND_GRACE_SEC = 10 * 60
+# 提醒任务等待计划时间到来的上限（防止用户把提醒时间设得过早导致长时间挂起）
+_REMIND_MAX_WAIT_SEC = 60 * 60
 
 
 def _session_mark() -> str:
@@ -46,6 +62,14 @@ _DEFAULT_CONFIG = {
     "randomize_time": False,
     "delays": {"min": 1.0, "max": 3.0},
     "retry": {"max_attempts": 3, "interval_sec": 10},
+    "network": {"wait_timeout_min": 5},
+    "notify": {
+        "webhook_url": "",
+        "remind_time": "22:30",
+        "auto_resend": True,
+        "notify_on_fail": True,
+        "mention_all": True,
+    },
     "browser": {"gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
     "log": {"dir": "logs", "keep_days": 30},
 }
@@ -100,6 +124,48 @@ def _release_lock(f) -> None:
     f.close()
 
 
+def _load_run_mark() -> dict:
+    try:
+        with open(RUN_FILE, encoding="utf-8") as f:
+            return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_run(planned: str = None, failed=None, log=None) -> None:
+    """记录本轮计划/结果到 data/last_run.json。
+
+    用途：晚间提醒任务需要知道"今天的计划发送时间"（randomize_time 开启时，
+    任务跑完后 config.yaml 里的 send_time 已变成明天的，不能再用），
+    以及最终有哪些好友失败。"""
+    data = _load_run_mark()
+    today = datetime.date.today().isoformat()
+    if data.get("date") != today:
+        data = {"date": today}
+    if planned:
+        data["planned"] = planned
+    if failed is not None:
+        data["failed"] = list(failed)
+        data["updated"] = datetime.datetime.now().strftime("%H:%M:%S")
+    try:
+        os.makedirs(os.path.dirname(RUN_FILE), exist_ok=True)
+        tmp = RUN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, RUN_FILE)
+    except OSError as e:
+        if log is not None:
+            log.warning(f"写入 last_run.json 失败：{e}")
+
+
+def _planned_today() -> str:
+    """今天的计划发送时间 'HH:MM'；今天没跑过任务返回空串。"""
+    data = _load_run_mark()
+    if data.get("date") == datetime.date.today().isoformat():
+        return str(data.get("planned") or "")
+    return ""
+
+
 def _parse_send_time(send_time: str) -> tuple:
     """解析 'HH:MM'，非法时回退 09:00。"""
     try:
@@ -111,13 +177,21 @@ def _parse_send_time(send_time: str) -> tuple:
     return 9, 0
 
 
-def _send_all(cfg: dict, log) -> int:
-    """执行发送流程。返回退出码。"""
-    friends = cfg["friends"]
-    todo = [f for f in friends if state.need_send(f)]
+def _send_all(cfg: dict, log, only=None) -> list:
+    """执行发送流程：对 only（默认全部好友）中今天未发送的好友发送。
+
+    发送前先等网络可用（睡眠唤醒后 Wi-Fi 重连慢是漏发主因）。
+    返回本轮仍失败的好友列表（成功者已写入 state.json）。"""
+    base = list(only) if only is not None else list(cfg["friends"])
+    todo = [f for f in base if state.need_send(f)]
     if not todo:
-        log.info("今天所有好友均已发送，无需操作")
-        return 0
+        log.info("本轮没有需要发送的好友")
+        return []
+
+    wait_min = float(cfg.get("network", {}).get("wait_timeout_min", 5))
+    if not notify.wait_for_network(log, wait_min):
+        log.error(f"网络在 {wait_min:g} 分钟等待期内仍未恢复，本轮放弃")
+        return todo
 
     log.info(f"本次需要发送的好友：{todo}")
     p, context = launch(
@@ -127,10 +201,9 @@ def _send_all(cfg: dict, log) -> int:
     try:
         if not ensure_logged_in(context, cfg["browser"]["login_timeout_sec"]):
             log.error("登录未完成，终止本次任务")
-            return 1
+            return todo
 
         page = context.new_page()
-        success = 0
         for friend in todo:
             try:
                 # 标准化：每个好友发送前都重新进入消息页（从会话列表视图开始），
@@ -143,18 +216,138 @@ def _send_all(cfg: dict, log) -> int:
                         continue
                 if sender.send_to_friend(context, page, friend, cfg):
                     state.mark_sent(friend)
-                    success += 1
                 else:
                     log.error(f"给 {friend} 发送失败（已重试 {cfg['retry']['max_attempts']} 次）")
             except Exception as e:  # noqa: BLE001 - 单个好友失败不影响后续
                 log.error(f"给 {friend} 发送异常：{e}")
         page.close()
 
-        log.info(f"本次任务结束：成功 {success}/{len(todo)}")
-        return 0 if success == len(todo) else 1
+        failed = [f for f in todo if state.need_send(f)]
+        log.info(f"本轮任务结束：成功 {len(todo) - len(failed)}/{len(todo)}")
+        return failed
     finally:
         context.close()
         p.stop()
+
+
+def _send_all_safe(cfg: dict, log, only=None) -> list:
+    """_send_all 的兜底包装：浏览器/环境崩溃不应中断外层重试循环。"""
+    try:
+        return _send_all(cfg, log, only)
+    except Exception as e:  # noqa: BLE001
+        log.error(f"本轮发送过程异常：{e}")
+        base = list(only) if only is not None else list(cfg["friends"])
+        return [f for f in base if state.need_send(f)]
+
+
+def _run_send_phase(cfg: dict, log) -> int:
+    """发送阶段：网络等待 → 发送一轮 → 失败立即推送提醒。
+
+    不做进程内轮询重试：失败退出后，Windows 的"网络已连接"事件触发器
+    （register_task.ps1 订阅 NetworkProfile/Operational 10000）会在网络恢复的
+    瞬间重新拉起本程序补发，晚间提醒任务（--remind）再兜底一次。
+    返回退出码：0=全部成功，1=仍有好友失败。"""
+    todo_now = [f for f in cfg["friends"] if state.need_send(f)]
+    if not todo_now:
+        log.info("今天所有好友均已发送，无需操作")
+        return 0
+    # 读取今天此前的失败记录：若是联网事件触发的一次恢复性补发，成功后要推"已恢复"
+    mark = _load_run_mark()
+    prev_failed = (list(mark.get("failed") or [])
+                   if mark.get("date") == datetime.date.today().isoformat() else [])
+    # 记录今天的计划发送时间（晚间提醒任务据此判断"是否确实错过了"）
+    _record_run(planned=str(cfg.get("send_time", "09:00")), log=log)
+
+    failed = _send_all_safe(cfg, log, None)
+    _record_run(failed=failed, log=log)
+
+    ncfg = cfg.get("notify", {})
+    webhook = str(ncfg.get("webhook_url") or "")
+    if failed:
+        if ncfg.get("notify_on_fail", True) and webhook:
+            ok = notify.send_webhook(
+                ncfg["webhook_url"], notify.build_fail_text(failed),
+                mention_all=bool(ncfg.get("mention_all", True)), log=log)
+            log.info("失败通知已推送到群" if ok else "失败通知推送失败")
+        else:
+            log.warning(f"今日发送失败：{failed}；网络恢复时将由联网事件自动补发")
+        return 1
+    if prev_failed and webhook:
+        recovered = [f for f in prev_failed if not state.need_send(f)] or prev_failed
+        ok = notify.send_webhook(webhook, notify.build_recover_text(recovered), log=log)
+        log.info("补发成功通知已推送到群" if ok else "补发成功通知推送失败")
+    return 0
+
+
+def _run_remind_phase(cfg: dict, log) -> int:
+    """晚间提醒任务（--remind，由计划程序每日触发）。
+
+    今日仍有好友未发送 → 等计划时间+宽限期过后：
+    ① 先自动补发一次（网络早恢复了的话直接抢救成功）；
+    ② 仍失败则推送企业微信群机器人提醒。"""
+    friends = cfg["friends"]
+    if not friends:
+        log.info("未配置好友，提醒任务无需执行")
+        return 0
+    todo = [f for f in friends if state.need_send(f)]
+    if not todo:
+        log.info("今天所有好友均已发送，提醒任务退出")
+        return 0
+
+    # 时间闸门：计划时间 + 宽限期未到 → 等一会再查（随机时间可能比提醒时间晚）
+    planned = _planned_today()
+    if planned:
+        hh, mm = _parse_send_time(planned)
+        now = datetime.datetime.now()
+        target = (now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                  + datetime.timedelta(seconds=_REMIND_GRACE_SEC))
+        if now < target:
+            wait_sec = min(int((target - now).total_seconds()), _REMIND_MAX_WAIT_SEC)
+            log.info(f"今日计划发送时间 {planned} 的宽限期未到，等待 {wait_sec} 秒后再检查")
+            waited = 0
+            while waited < wait_sec:
+                time.sleep(min(30, wait_sec - waited))
+                waited += 30
+                if not [f for f in friends if state.need_send(f)]:
+                    log.info("等待期间检测到今天已完成，提醒任务退出")
+                    return 0
+            todo = [f for f in friends if state.need_send(f)]
+            if not todo:
+                return 0
+    else:
+        log.info("今天没有任务运行记录（计划时间未知），直接进入提醒检查")
+
+    lock = _acquire_lock()
+    if lock is None:
+        log.info("检测到发送任务正在运行，提醒任务退出（结果由该任务负责通知）")
+        return 0
+    try:
+        todo = [f for f in friends if state.need_send(f)]
+        if not todo:
+            log.info("今天所有好友均已发送，提醒任务退出")
+            return 0
+        ncfg = cfg.get("notify", {})
+        webhook = str(ncfg.get("webhook_url") or "")
+        if ncfg.get("auto_resend", True):
+            log.info(f"今日 {len(todo)} 位好友未发送成功，开始自动补发：{todo}")
+            failed = _send_all_safe(cfg, log, todo)
+            _record_run(failed=failed, log=log)
+            if not failed:
+                log.info("晚间自动补发成功")
+                if webhook:
+                    notify.send_webhook(webhook, notify.build_resend_ok_text(todo), log=log)
+                return 0
+            todo = failed
+        if webhook:
+            ok = notify.send_webhook(
+                webhook, notify.build_remind_text(todo),
+                mention_all=bool(ncfg.get("mention_all", True)), log=log)
+            log.info("晚间提醒已推送到群" if ok else "晚间提醒推送失败")
+        else:
+            log.warning(f"今日仍未发送成功：{todo}；未配置 webhook，无法远程提醒")
+        return 1
+    finally:
+        _release_lock(lock)
 
 
 def _task_exists() -> bool:
@@ -188,13 +381,14 @@ def _randomize_next_day(cfg: dict, log) -> None:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
     except Exception as e:  # noqa: BLE001
         log.warning(f"写入明日发送时间失败：{e}")
-    # 重新注册自启任务（更新每日触发时间）
+    # 重新注册自启任务（更新每日触发时间；提醒任务沿用配置里的时间）
     ps = os.path.join(APP_DIR, "scripts", "register_task.ps1")
     if os.path.exists(ps):
         try:
+            remind_time = str(cfg.get("notify", {}).get("remind_time", "22:30") or "")
             subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                 "-File", ps, "-Time", new_time],
+                 "-File", ps, "-Time", new_time, "-RemindTime", remind_time],
                 capture_output=True, timeout=90,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
             )
@@ -205,14 +399,18 @@ def _randomize_next_day(cfg: dict, log) -> None:
         log.warning("未找到 register_task.ps1，仅更新 config 中的时间")
 
 
-def main() -> int:
+def main(mode: str = "run") -> int:
     cfg = load_config()
     cfg = _resolve_paths(cfg)
     log = init_logger(cfg["log"]["dir"], cfg["log"]["keep_days"])
+    log.info(f"DY_SparkAutoKeeper v{VERSION} 启动（mode={mode}）")
 
-    friends = cfg["friends"]
     # 防御：过滤空/纯空白好友名（手动编辑 config.yaml 可能引入），避免发送时误匹配
-    cfg["friends"] = [str(f).strip() for f in (friends or []) if str(f).strip()]
+    cfg["friends"] = [str(f).strip() for f in (cfg.get("friends") or []) if str(f).strip()]
+
+    if mode == "remind":
+        return _run_remind_phase(cfg, log)
+
     friends = cfg["friends"]
     if not friends:
         log.info("尚未配置好友：本次运行将只进行登录检查/扫码登录")
@@ -276,7 +474,7 @@ def main() -> int:
                 context.close()
                 p.stop()
 
-        result = _send_all(cfg, log)
+        result = _run_send_phase(cfg, log)
         # 可选：每日任务执行结束后随机明日时间并自动更新自启（默认关闭=固定时间）
         if cfg.get("randomize_time", False):
             _randomize_next_day(cfg, log)
@@ -288,4 +486,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _mode = "remind" if "--remind" in [a.lower() for a in sys.argv[1:]] else "run"
+    sys.exit(main(_mode))
