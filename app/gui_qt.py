@@ -14,7 +14,7 @@ import datetime
 import json
 import time
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QVariantAnimation
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QVariantAnimation, QRectF
 from PyQt5.QtGui import (QFont, QDesktopServices, QColor, QIcon, QPainter, QPainterPath,
                          QConicalGradient, QPen)
 from PyQt5.QtWidgets import (
@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QGridLayout,
     QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -172,7 +173,7 @@ QLabel#BadgeRed { color: #FFFFFF; background: #D67F76; border-radius: 12px; padd
 QLabel#BadgeCheck { color: #FFFFFF; background: #DE9A44; border-radius: 12px; padding: 6px 16px; font-size: 15px; font-weight: 600; }
 QLabel#GuideCard { background: #FFF6E6; color: #8A5A28; border: 1px solid #F0DDC0; border-radius: 9px; padding: 11px 14px; font-size: 16px; }
 QLabel#UpdateCard { background: #FDF0D5; color: #7A4A12; border: 1px solid #E5B04C; border-radius: 9px; padding: 12px 14px; font-size: 16px; font-weight: 600; }
-QLabel#AboutText { color: #B7AA9B; font-size: 14px; }
+QLabel#AboutText { color: #A99C8C; font-size: 16px; }
 QToolTip { background: #FFF9F1; color: #7A6A58; border: 1px solid #E8D3B8; padding: 6px 8px; font-size: 15px; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 0; }
 QScrollBar::handle:vertical { background: #E4D7C5; border-radius: 4px; min-height: 24px; }
@@ -330,33 +331,32 @@ class NoticeDialog(QDialog):
 
 
 class Toast(QFrame):
-    """右下角光效小弹窗：暖色跑马灯光环绕边流动，数秒后淡出。不打断任何操作。"""
+    """右下角提示小卡：白底主题风，一道橙光沿边框匀速跑一圈后淡出消失。"""
 
     _instance = None
 
     @classmethod
-    def show_toast(cls, parent, text: str, kind: str = "info", msec: int = 4200):
+    def show_toast(cls, parent, text: str, kind: str = "info", lap_ms: int = 1900):
         if cls._instance is not None:
             try:
                 cls._instance.close()
             except Exception:  # noqa: BLE001
                 pass
-        t = cls(parent, text, kind, msec)
+        t = cls(parent, text, kind, lap_ms)
         cls._instance = t
         return t
 
-    def __init__(self, parent, text: str, kind: str, msec: int):
+    def __init__(self, parent, text: str, kind: str, lap_ms: int):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self._angle = 0
-        self._kind = kind
+        self._angle = 0.0
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 13, 20, 13)
         icon = {"ok": "✅ ", "warn": "⚠️ ", "info": "💡 "}.get(kind, "")
         self.lbl = QLabel(icon + text)
         self.lbl.setWordWrap(True)
-        self.lbl.setStyleSheet("color: #FFF3E4; font-size: 15px; background: transparent;")
+        self.lbl.setStyleSheet("color: #453D33; font-size: 15px; background: transparent;")
         lay.addWidget(self.lbl)
         self.setFixedWidth(430)
         self.adjustSize()
@@ -364,23 +364,28 @@ class Toast(QFrame):
         self.move(max(12, pw - self.width() - 26), max(12, ph - self.height() - 58))
         self.show()
         self.raise_()
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(16)
-        QTimer.singleShot(msec, self._fade)
+        # 单圈慢转：QVariantAnimation 帧间平滑插值，转完自动淡出消失
+        lap = QVariantAnimation(self)
+        lap.setStartValue(0.0)
+        lap.setEndValue(360.0)
+        lap.setDuration(max(600, int(lap_ms)))
+        lap.valueChanged.connect(self._on_lap)
+        lap.finished.connect(self._fade)
+        lap.start()
+        self._lap = lap
+        self._anim = None  # 淡出动画引用，防 GC
 
-    def _tick(self):
-        self._angle = (self._angle + 8) % 360
+    def _on_lap(self, v):
+        self._angle = float(v)
         self.update()
 
     def _fade(self):
-        self._timer.stop()
         eff = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(eff)
         anim = QVariantAnimation(self)
         anim.setStartValue(1.0)
         anim.setEndValue(0.0)
-        anim.setDuration(420)
+        anim.setDuration(300)
         anim.valueChanged.connect(eff.setOpacity)
         anim.finished.connect(self.close)
         anim.start()
@@ -389,23 +394,21 @@ class Toast(QFrame):
     def paintEvent(self, e):
         pa = QPainter(self)
         pa.setRenderHint(QPainter.Antialiasing)
-        r = self.rect().adjusted(3, 3, -3, -3)
+        r = QRectF(self.rect()).adjusted(3, 3, -3, -3)
         path = QPainterPath()
         path.addRoundedRect(r, 12, 12)
-        pa.fillPath(path, QColor(56, 46, 38, 238))
-        # 底层暗金描边
-        pa.setPen(QPen(QColor(232, 147, 90, 80), 2))
+        # 白底主题色卡片 + 细边
+        pa.fillPath(path, QColor(255, 255, 255, 248))
+        pa.setPen(QPen(QColor(238, 224, 204, 255), 1))
         pa.drawPath(path)
-        # 跑马灯：锥形渐变亮弧随角度旋转，视觉上光沿边框跑一圈
+        # 一道橙光沿边框跑（锥形渐变亮弧随角度旋转）
         g = QConicalGradient(self.rect().center(), -self._angle)
-        g.setColorAt(0.00, QColor(255, 224, 178, 0))
-        g.setColorAt(0.70, QColor(255, 224, 178, 0))
-        g.setColorAt(0.85, QColor(255, 224, 178, 210))
-        g.setColorAt(0.92, QColor(240, 156, 93, 255))
-        g.setColorAt(1.00, QColor(255, 224, 178, 0))
+        g.setColorAt(0.00, QColor(232, 147, 90, 0))
+        g.setColorAt(0.70, QColor(232, 147, 90, 0))
+        g.setColorAt(0.84, QColor(255, 190, 130, 190))
+        g.setColorAt(0.92, QColor(224, 127, 60, 255))
+        g.setColorAt(1.00, QColor(232, 147, 90, 0))
         pa.setPen(QPen(g, 3))
-        pa.drawPath(path)
-        pa.setPen(QPen(QColor(255, 240, 220, 150), 1))
         pa.drawPath(path)
         pa.end()
 
@@ -423,8 +426,7 @@ class SparkGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("DY_SparkAutoKeeper")  # 标题不可改：单实例激活依赖窗口名查找
         _app_icon() and self.setWindowIcon(_app_icon())
-        self.resize(1240, 920)
-        self.setMinimumSize(1060, 720)
+        self.setFixedSize(1400, 950)  # 固定尺寸（宽多高少）：不允许最大化/拉伸，保证版式始终协调
         self.setStyleSheet(QSS)
 
         self.cfg = load_config()
@@ -964,7 +966,7 @@ class SparkGUI(QMainWindow):
         self.btn_check_update.setText(f"下载新版本 v{ver}")
         self.btn_check_update.setObjectName("Primary")
         self._restyle(self.btn_check_update)
-        Toast.show_toast(self, f"发现新版本 v{ver}（当前 v{VERSION}）：点「下载新版本」开始更新", "ok", 5000)
+        Toast.show_toast(self, f"发现新版本 v{ver}（当前 v{VERSION}）：点「下载新版本」开始更新", "ok")
 
     def _poll_remote(self):
         if not self._remote_done and time.time() < getattr(self, "_wait_deadline", 0):
@@ -988,19 +990,20 @@ class SparkGUI(QMainWindow):
             self.btn_check_update.setText(f"下载新版本 v{ver}")
             self.btn_check_update.setObjectName("Primary")
             self._restyle(self.btn_check_update)
-            Toast.show_toast(self, f"发现新版本 v{ver}（当前 v{VERSION}）：点「下载新版本」开始更新", "ok", 5000)
+            Toast.show_toast(self, f"发现新版本 v{ver}（当前 v{VERSION}）：点「下载新版本」开始更新", "ok")
             return
         if getattr(self, "_manual_pending", False):
             self._manual_pending = False
+            self.btn_check_update.setText("检查更新")  # 恢复按钮文案（检测中 -> 就绪）
             if timed_out or not ver:
-                Toast.show_toast(self, "检查更新失败：无法连接版本服务器（GitHub），请稍后重试", "warn", 5000)
+                Toast.show_toast(self, "检查更新失败：无法连接版本服务器（GitHub），请稍后重试", "warn")
             else:
-                Toast.show_toast(self, f"已是最新版本 v{VERSION}，无需更新", "info", 3600)
+                Toast.show_toast(self, f"已是最新版本 v{VERSION}，无需更新", "info")
 
     def _manual_check_update(self):
         if getattr(self, "_updating", False) or self._running or getattr(self, "_login_running", False) \
                 or getattr(self, "_login_checking", False):
-            Toast.show_toast(self, "当前有任务或检测正在进行，稍后再试", "warn", 3200)
+            Toast.show_toast(self, "当前有任务或检测正在进行，稍后再试", "warn")
             return
         # 已检测到新版本：按钮此时就是"下载新版本"
         if self._remote_version and upd.is_newer(self._remote_version, VERSION):
@@ -1021,7 +1024,7 @@ class SparkGUI(QMainWindow):
         if not ver or getattr(self, "_updating", False):
             return
         if self._running or getattr(self, "_login_running", False):
-            Toast.show_toast(self, "发送任务进行中，无法更新。请等待任务结束后再试", "warn", 4200)
+            Toast.show_toast(self, "发送任务进行中，无法更新。请等待任务结束后再试", "warn")
             return
         if mode is None:
             mode = self._pick_update_source()
@@ -1104,10 +1107,10 @@ class SparkGUI(QMainWindow):
             self.btn_check_update.setObjectName("Primary")
             self._restyle(self.btn_check_update)
             if state["cancel"]:
-                Toast.show_toast(self, "下载已取消：点「下载新版本」可换一个源重试", "warn", 4200)
+                Toast.show_toast(self, "下载已取消：点「下载新版本」可换一个源重试", "warn")
             else:
                 Toast.show_toast(self, "下载失败：所有下载源均失败。点「下载新版本」换源重试，"
-                                       "或到 GitHub Releases 页面手动下载", "warn", 6000)
+                                       "或到 GitHub Releases 页面手动下载", "warn")
 
     def _apply_update(self, ver: str, dest: str):
         """校验 → 快照 → 生成接力脚本 → 短暂提示后自动应用并重启。"""
@@ -1116,14 +1119,14 @@ class SparkGUI(QMainWindow):
                 os.remove(dest)
             except OSError:
                 pass
-            Toast.show_toast(self, "更新包校验未通过，已自动删除。请点「下载新版本」重新下载", "warn", 6000)
+            Toast.show_toast(self, "更新包校验未通过，已自动删除。请点「下载新版本」重新下载", "warn")
             self._updating = False
             return
         self._updating = True
         self.btn_check_update.setEnabled(False)
         upd.backup_user_files(APP_DIR)
         ps1 = upd.write_apply_script(APP_DIR, dest, restart=True)
-        Toast.show_toast(self, "更新包校验通过：程序即将关闭并自动安装新版本，随后自动重启", "ok", 2600)
+        Toast.show_toast(self, "更新包校验通过：程序即将关闭并自动安装新版本，随后自动重启", "ok")
         QTimer.singleShot(2400, lambda: (upd.launch_apply(ps1), self.close()))
 
     # ---------- 事件 ----------
@@ -1433,7 +1436,32 @@ class SparkGUI(QMainWindow):
 _SHARED_MEM = None
 
 
+def _install_excepthook():
+    """界面回调里未捕获的异常默认会触发 PyQt5 qFatal 直接闪退；
+    换成记录到 data/gui_crash.log，程序保持存活。"""
+
+    def hook(etype, val, tb):
+        import traceback
+
+        try:
+            os.makedirs(os.path.join(APP_DIR, "data"), exist_ok=True)
+            with open(os.path.join(APP_DIR, "data", "gui_crash.log"), "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S") + chr(10))
+                traceback.print_exception(etype, val, tb, file=f)
+        except Exception:  # noqa: BLE001
+            pass
+
+    sys.excepthook = hook
+    try:
+        import threading
+
+        threading.excepthook = lambda a: hook(a.exc_type, a.exc_value, a.exc_traceback)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
+    _install_excepthook()
     # 仅最小化控制台窗口（黑框缩到任务栏），GUI 主窗口正常显示
     try:
         import ctypes
