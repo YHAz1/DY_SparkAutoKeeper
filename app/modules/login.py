@@ -48,10 +48,20 @@ def _kill_stale_browser(profile_dir: str) -> None:
         pass
 
 
+# gpu=False（省资源模式）时的全套软件渲染参数：不碰显卡的任何加速路径
+_SOFTWARE_RENDER_ARGS = [
+    "--disable-gpu",
+    "--disable-gpu-compositing",
+    "--disable-accelerated-2d-canvas",
+    "--disable-accelerated-video-decode",
+    "--disable-accelerated-video-encode",
+]
+
+
 def launch(profile_dir: str, gpu: bool = True) -> Tuple[object, BrowserContext]:
     """启动浏览器（持久化 profile，含登录 cookie）。返回 (playwright, context)。
     固定有头模式：无头模式在部分环境下易崩溃且风控更高，已移除该选项。
-    gpu=False 时禁用 GPU 渲染（纯软件渲染更慢但完全不占显卡，适合显卡正跑模型时）。
+    gpu=False：全套软件渲染参数，完全不碰显卡（页面渲染走 CPU，稍慢但发送任务不受影响）。
 
     启动失败的自愈：① 清理占用 profile 的残留进程后重试；
     ② 仍失败则把旧 profile 隔离为 profile.corrupt-时间戳（可手动找回），
@@ -59,7 +69,7 @@ def launch(profile_dir: str, gpu: bool = True) -> Tuple[object, BrowserContext]:
     logger = get_logger()
     args = ["--disable-blink-features=AutomationControlled"]
     if not gpu:
-        args.append("--disable-gpu")
+        args += _SOFTWARE_RENDER_ARGS
     p = sync_playwright().start()
     last_err: Exception = RuntimeError("browser launch failed")
     for attempt in (1, 2, 3):
@@ -115,7 +125,11 @@ def ensure_logged_in(context: BrowserContext, timeout_sec: int = 180) -> bool:
             _mark_logged_in()
             return True
 
-        page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
+        try:
+            page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:  # noqa: BLE001 - 主页偶发加载失败，重试一次
+            logger.warning(f"打开 DouYin 主页异常，重试一次：{type(e).__name__}")
+            page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
         if _is_logged_in(context):
             logger.info("登录态检测通过")

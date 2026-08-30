@@ -14,7 +14,7 @@ import datetime
 import json
 import time
 
-from PyQt5.QtCore import Qt, QTimer, QUrl
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QFont, QDesktopServices, QColor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -305,6 +305,11 @@ class NoticeDialog(QDialog):
 # ---------------- 主窗口 ----------------
 
 class SparkGUI(QMainWindow):
+    # 跨线程 UI 更新：工作线程只 emit 信号，槽在主线程执行（Qt 跨线程自动排队）
+    sig_refresh_task = pyqtSignal()
+    sig_login_settle = pyqtSignal()
+    sig_login_reset = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DY_SparkAutoKeeper")
@@ -314,6 +319,10 @@ class SparkGUI(QMainWindow):
 
         self.cfg = load_config()
         self._running = False
+
+        self.sig_refresh_task.connect(self._refresh_task_state)
+        self.sig_login_settle.connect(self._settle_login_badge)
+        self.sig_login_reset.connect(self._on_login_worker_done)
 
         self._build_ui()
         self._load_config_to_ui()
@@ -506,6 +515,11 @@ class SparkGUI(QMainWindow):
         v.addLayout(row_r)
 
         self.chk_gpu = QCheckBox("启用 GPU 渲染（流畅；显卡跑模型时可关闭）")
+        hint_g = QLabel("发送前会自动检查电脑负载：CPU/显卡占用过高时先等待并定期复查，降下来才启动浏览器（load_gate 配置可调）。"
+                            "关闭 GPU 时浏览器走纯 CPU 软件渲染，完全不碰显卡。")
+        hint_g.setObjectName("Hint")
+        hint_g.setWordWrap(True)
+        v.addWidget(hint_g)
         v.addWidget(self.chk_gpu)
         self.chk_random = QCheckBox("每日任务后自动随机明日发送时间（9:00-22:00）并更新定时任务")
         v.addWidget(self.chk_random)
@@ -641,7 +655,7 @@ class SparkGUI(QMainWindow):
 
     def _load_config_to_ui(self):
         self.edit_time.setText(str(self.cfg.get("send_time", "09:00")))
-        self.edit_text.setText(self.cfg["message"].get("text", "[续火花]"))
+        self.edit_text.setText(self.cfg["message"].get("text", "[续火花吧]"))
         self.list_friends.clear()
         for name in self.cfg.get("friends", []):
             self.list_friends.addItem(name)
@@ -1042,6 +1056,16 @@ class SparkGUI(QMainWindow):
         if not os.path.exists(CONFIG_PATH):
             self._settle_login_badge()
             return
+        try:
+            from modules import runlock
+
+            _cal_lock = runlock.acquire_lock(os.path.join(APP_DIR, "data", "run.lock"))
+        except Exception:  # noqa: BLE001
+            _cal_lock = None
+        if _cal_lock is None:
+            # 定时发送任务正在运行：绝不争抢浏览器，直接按当前标记落定
+            self._settle_login_badge()
+            return
         self._login_checking = True
         self._start_login_spinner()
 
@@ -1062,8 +1086,15 @@ class SparkGUI(QMainWindow):
             except Exception:  # noqa: BLE001 - 静默失败：按当前标记落定，后续任务运行会自动校正
                 pass
             finally:
+                if _cal_lock is not None:
+                    try:
+                        from modules import runlock
+
+                        runlock.release_lock(_cal_lock)
+                    except Exception:  # noqa: BLE001
+                        pass
                 self._login_checking = False
-                self._settle_login_badge()
+                self.sig_login_settle.emit()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1184,6 +1215,13 @@ class SparkGUI(QMainWindow):
         )
         self._refresh_task_state()
 
+    def _on_login_worker_done(self):
+        """登录子进程结束（主线程槽）：复位按钮并刷新徽章。"""
+        self._login_running = False
+        self.btn_login.setText("扫码登录")
+        self.btn_login.setEnabled(True)
+        self._refresh_task_state()
+
     def _run_login_once(self):
         """「扫码登录」按钮：只执行登录任务（--login），成功后按钮自动消失。"""
         if getattr(self, "_login_running", False) or self._running:
@@ -1207,10 +1245,7 @@ class SparkGUI(QMainWindow):
 
             traceback.print_exc()
         finally:
-            self._login_running = False
-            self.btn_login.setText("扫码登录")
-            self.btn_login.setEnabled(True)
-            self._refresh_task_state()
+            self.sig_login_reset.emit()
 
     def _run_once(self):
         if self._running:
@@ -1237,7 +1272,7 @@ class SparkGUI(QMainWindow):
             traceback.print_exc()
         finally:
             self._running = False
-            self._refresh_task_state()
+            self.sig_refresh_task.emit()
 
     # ---------- 刷新 ----------
 

@@ -26,3 +26,9 @@ log:
   dir: logs
   keep_days: 30
 randomize_time: false
+load_gate:
+  enabled: true
+  cpu_max: 80
+  gpu_max: 80
+  interval_min: 5
+  max_wait_min: 120

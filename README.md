@@ -138,7 +138,7 @@ conda run -n dy_spark python app\main.py
 | `randomize_time` | 每日任务完成后自动随机明日发送时间（9:00–22:00） | `false` |
 | `delays.min/max` | 输入前后拟人化随机延迟范围（秒） | `1.0 / 3.0` |
 | `retry.max_attempts` | 单个好友失败重试次数 | `3` |
-| `browser.gpu` | GPU 渲染加速 | `true` |
+| `browser.gpu` | GPU 渲染加速（流畅）；显卡跑模型时可关闭为纯 CPU 渲染 | `true` |
 | `log.keep_days` | 日志保留天数 | `30` |
 | `network.wait_timeout_min` | 发送前等待网络就绪的最长时间（分钟） | `5` |
 | `notify.webhook_url` | 企业微信群机器人 Webhook 地址（留空关闭远程提醒） | 空 |

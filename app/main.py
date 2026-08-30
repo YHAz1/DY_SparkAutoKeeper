@@ -26,9 +26,10 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from version import VERSION
-from modules import sender, state, notify
+from modules import sender, state, notify, loadgate
 from modules.logger import init_logger, get_logger
 from modules.login import ensure_logged_in, launch
+from modules import runlock
 
 
 def _app_dir() -> str:
@@ -75,6 +76,7 @@ _DEFAULT_CONFIG = {
     "delays": {"min": 1.0, "max": 3.0},
     "retry": {"max_attempts": 3, "interval_sec": 10},
     "network": {"wait_timeout_min": 5},
+    "load_gate": {"enabled": True, "cpu_max": 80, "gpu_max": 80, "interval_min": 5, "max_wait_min": 120},
     "notify": {
         "webhook_url": "",
         "remind_time": "22:30",
@@ -114,26 +116,11 @@ def _resolve_paths(cfg: dict) -> dict:
 
 def _acquire_lock():
     """获取运行锁（Windows 文件锁）。返回文件对象表示成功，None 表示已有实例在运行。"""
-    try:
-        import msvcrt
-
-        os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
-        f = open(LOCK_PATH, "a+")
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-        return f
-    except OSError:
-        return None
+    return runlock.acquire_lock(LOCK_PATH)
 
 
 def _release_lock(f) -> None:
-    try:
-        import msvcrt
-
-        f.seek(0)
-        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-    except OSError:
-        pass
-    f.close()
+    runlock.release_lock(f)
 
 
 def _load_run_mark() -> dict:
@@ -233,6 +220,9 @@ def _send_all(cfg: dict, log, only=None) -> list:
     if not todo:
         log.info("本轮没有需要发送的好友")
         return []
+
+    # 负载闸门：主程序占满 CPU/显卡时先避让，降下来才启动浏览器
+    loadgate.wait_for_idle(cfg, log)
 
     wait_min = float(cfg.get("network", {}).get("wait_timeout_min", 5))
     if not notify.wait_for_network(log, wait_min):
@@ -453,7 +443,9 @@ def main(mode: str = "run") -> int:
     log.info(f"DY_SparkAutoKeeper v{VERSION} 启动（mode={mode}）")
 
     # 防御：过滤空/纯空白好友名（手动编辑 config.yaml 可能引入），避免发送时误匹配
-    cfg["friends"] = [str(f).strip() for f in (cfg.get("friends") or []) if str(f).strip()]
+    # 去重保序：重复好友会导致重复发送
+    cfg["friends"] = list(dict.fromkeys(
+        str(f).strip() for f in (cfg.get("friends") or []) if str(f).strip()))
 
     if mode == "remind":
         return _run_remind_phase(cfg, log)

@@ -580,6 +580,11 @@ def _send_text(page: Page, text: str) -> bool:
         page.wait_for_timeout(300)
         box.press_sequentially(text, delay=100)
         page.wait_for_timeout(500)
+        # 关键校验：文字必须真的进了输入框。否则下方"输入框为空"会被
+        # 信号2 误判为发送成功（信号2 的设计含义是"发送后输入框被清空"）
+        if box_state() != "has-text":
+            logger.warning("输入后输入框仍为空，文字未进入输入框（不视为发送成功）")
+            return False
         logger.info(f"已输入发送内容：{text}")
 
         # 方式1：回车发送，轮询等待成功信号（最多 5 秒）
