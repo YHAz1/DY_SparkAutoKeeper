@@ -65,6 +65,20 @@ from version import VERSION
 # 隐藏子进程控制台窗口（防止 schtasks/powershell 等闪现黑框）
 CREATE_NO_WINDOW = 0x08000000
 
+
+def _app_icon() -> QIcon:
+    """应用火花图标：PNG 优先（不依赖 qico 插件），ico 兜底。
+    覆盖开发目录、打包 _internal 与 _MEIPASS 三处位置。"""
+    base = [APP_DIR, os.path.join(APP_DIR, "_internal")]
+    if getattr(sys, "_MEIPASS", ""):
+        base.append(sys._MEIPASS)
+    for name in ("SparkAK.png", "SparkAK.ico"):
+        for d in base:
+            _p = os.path.join(d, name)
+            if os.path.exists(_p):
+                return QIcon(_p)
+    return QIcon()
+
 USAGE_TEXT = """【使用说明】
 1. 首次使用：未登录时点状态区的「扫码登录」按钮，在弹出的浏览器中扫码登录你的账号；登录态保存在本机，之后自动复用
 2. 好友列表：填入你对该好友的备注（需与对方有私信记录，会话列表可见）
@@ -279,13 +293,7 @@ class NoticeDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("DY_SparkAutoKeeper")  # 标题不可改：单实例激活依赖窗口名查找
-        for _p in (os.path.join(APP_DIR, "SparkAK.ico"),
-                   os.path.join(APP_DIR, "_internal", "SparkAK.ico"),
-                   os.path.join(getattr(sys, "_MEIPASS", ""), "SparkAK.ico")):
-            if os.path.exists(_p):
-                self.setWindowIcon(QIcon(_p))
-                break
+        self.setWindowTitle("DY_SparkAutoKeeper")
         # 去掉右上角关闭叉，只能通过按钮选择
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
         self.resize(660, 700)
@@ -413,7 +421,8 @@ class SparkGUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DY_SparkAutoKeeper")
+        self.setWindowTitle("DY_SparkAutoKeeper")  # 标题不可改：单实例激活依赖窗口名查找
+        _app_icon() and self.setWindowIcon(_app_icon())
         self.resize(1240, 920)
         self.setMinimumSize(1060, 720)
         self.setStyleSheet(QSS)
@@ -1437,6 +1446,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setFont(QFont("Microsoft YaHei UI", 10))
+    _icon = _app_icon()
+    if not _icon.isNull():
+        app.setWindowIcon(_icon)
 
     # 单实例：必须在 QApplication 创建之后（QSharedMemory 依赖 QCoreApplication）
     # 重复启动时激活已有窗口并退出，不允许多开
