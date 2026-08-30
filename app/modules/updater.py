@@ -129,9 +129,10 @@ def _curl_available() -> bool:
 
 
 def _curl_run(args: list, timeout: int = 30):
-    """执行 curl，返回 (returncode, stdout_bytes, stderr_text)。"""
+    """执行 curl，返回 (returncode, stdout_bytes, stderr_text)。不闪控制台黑窗。"""
     cmd = [_curl_path(), "-sS", "--ssl-no-revoke", *args]
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                       creationflags=0x08000000)  # CREATE_NO_WINDOW
     return r.returncode, r.stdout, r.stderr.decode("utf-8", errors="replace")
 
 

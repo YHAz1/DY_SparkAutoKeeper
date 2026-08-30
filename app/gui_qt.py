@@ -15,7 +15,7 @@ import json
 import time
 
 from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QVariantAnimation, QRectF
-from PyQt5.QtGui import (QFont, QDesktopServices, QColor, QIcon, QPainter, QPainterPath,
+from PyQt5.QtGui import (QFont, QDesktopServices, QColor, QIcon, QFontMetrics, QPainter, QPainterPath,
                          QConicalGradient, QPen)
 from PyQt5.QtWidgets import (
     QApplication,
@@ -352,16 +352,25 @@ class Toast(QFrame):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self._angle = 0.0
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 13, 20, 13)
+        lay.setContentsMargins(16, 8, 16, 8)
         icon = {"ok": "✅ ", "warn": "⚠️ ", "info": "💡 "}.get(kind, "")
         self.lbl = QLabel(icon + text)
         self.lbl.setWordWrap(True)
-        self.lbl.setStyleSheet("color: #453D33; font-size: 15px; background: transparent;")
+        self.lbl.setStyleSheet("color: #3E362C; font-size: 17px; background: transparent;")
         lay.addWidget(self.lbl)
-        self.setFixedWidth(430)
+        text_w = QFontMetrics(self.lbl.font()).horizontalAdvance(self.lbl.text())
+        self.setFixedWidth(max(230, min(760, text_w + 46)))  # 单行宽度自适应，超长自然折行
         self.adjustSize()
-        pw, ph = parent.width(), parent.height()
-        self.move(max(12, pw - self.width() - 26), max(12, ph - self.height() - 58))
+        # 与「检查更新」按钮等高、放在其左侧；无锚点时回退右下角
+        anchor = getattr(parent, "btn_check_update", None)
+        if anchor is not None:
+            pos = anchor.mapTo(parent, anchor.rect().topLeft())
+            bh = anchor.height()
+            self.move(max(12, pos.x() - self.width() - 10),        # 右边缘贴按钮左侧 10px
+                      pos.y() + (bh - self.height()) // 2)          # 垂直居中对齐按钮（单行≈等高）
+        else:
+            pw, ph = parent.width(), parent.height()
+            self.move(max(12, pw - self.width() - 26), max(12, ph - self.height() - 58))
         self.show()
         self.raise_()
         # 单圈慢转：QVariantAnimation 帧间平滑插值，转完自动淡出消失
