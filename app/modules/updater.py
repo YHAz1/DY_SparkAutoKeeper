@@ -6,7 +6,7 @@
 - 版本源按序尝试：GitHub API → jsDelivr → raw（各源独立超时）；仓库根维护 VERSION 文件。
 - 资产命名规律固定：DY_SparkAutoKeeper_v{ver}_win64.zip。
 - 下载候选 = 直连 + ghproxy 系镜像前缀逐个尝试；curl 自动遵循系统代理环境变量。
-- 完整性校验：zip 必含 app/app.exe 且首字节为 MZ（快速校验，不解压全量）。
+- 完整性校验：zip 必含主程序条目（SparkAK/SparkAK.exe，兼容旧 app/app.exe）且为 MZ。
 - 应用更新采用外部 PowerShell 脚本接力：等程序退出 → 旧 app.exe/_internal 改名留作回滚
   → tar/Expand-Archive 覆盖解压（zip 顶层即 app/，天然对位安装目录）→ 清理 → 可选重启。
   数据目录（data/、config.yaml、logs/）不在包内，全程零接触。
@@ -305,17 +305,18 @@ def download(candidates: list, dest_path: str, progress=None,
 
 
 def verify_zip(path: str) -> bool:
-    """快速完整性校验：能打开中央目录、包含 app/app.exe 且首两字节为 MZ。"""
+    """快速完整性校验：包含主程序条目（新布局 SparkAK/SparkAK.exe，
+    兼容旧布局 app/app.exe）且首两字节为 MZ。"""
     try:
         import zipfile
 
         with zipfile.ZipFile(path) as z:
             names = z.namelist()
-            if "app/app.exe" not in names:
-                return False
-            with z.open("app/app.exe") as f:
-                head = f.read(2)
-            return head == b"MZ"
+            for entry in ("SparkAK/SparkAK.exe", "app/app.exe"):
+                if entry in names:
+                    with z.open(entry) as f:
+                        return f.read(2) == b"MZ"
+            return False
     except Exception:  # noqa: BLE001
         return False
 
@@ -343,10 +344,12 @@ def backup_user_files(install_dir: str) -> "str | None":
 
 def write_apply_script(install_dir: str, zip_path: str, restart: bool = True) -> str:
     """生成升级接力脚本（UTF-8 BOM 的 PowerShell，兼容中文路径），保存在 zip 同目录。
-    流程：等程序完全退出（最多 30s）→ 清理本程序残留的浏览器/驱动进程（释放 _internal
-    与 profile 占用，这是旧版"更新后登录态异常"的主因）→ 旧 app.exe/_internal 改名留作
-    回滚点 → 覆盖解压 → 校验关键文件齐全（不完整自动回滚）→ 清理 → 可选重启。
-    注意：脚本与 zip 必须放在安装目录之外（如系统临时目录），避免"运行中删除自身所在目录"。"""
+
+    新版安装目录为 SparkAK/（zip 内层同名）。脚本自动处理一次性迁移：
+    旧 app/ 目录更新时，解压出 SparkAK/ 后把 data、config.yaml、logs 搬入新目录，
+    数据零丢失，随后清理旧目录。其余流程：等程序完全退出（最多 30s）→ 清理本程序
+    残留浏览器/驱动进程（释放 _internal 与 profile 占用）→ 旧执行体改名留作回滚点 →
+    覆盖解压 → 校验关键文件齐全（不完整自动回滚）→ 可选重启。"""
     parent = os.path.dirname(install_dir)
     ps_path = os.path.join(os.path.dirname(zip_path), "apply_update.ps1")
 
@@ -357,37 +360,41 @@ def write_apply_script(install_dir: str, zip_path: str, restart: bool = True) ->
 $zip  = "{q(zip_path)}"
 $dest = "{q(parent)}"
 $app  = "{q(install_dir)}"
+$newDir = Join-Path $dest "SparkAK"
 Start-Sleep -Seconds 2
-# 1) 等待主程序完全退出（最多 30 秒），避免文件占用导致"半更新"
+# 1) 等待本程序完全退出（新旧 exe 名都等，最多 30 秒）
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {{
-    $busy = Get-CimInstance Win32_Process -Filter "Name='app.exe'" |
-        Where-Object {{ $_.ExecutablePath -like "$app*" }}
+    $busy = Get-CimInstance Win32_Process | Where-Object {{
+        (($_.Name -eq 'app.exe') -or ($_.Name -eq 'SparkAK.exe')) -and
+        (($_.ExecutablePath -like "$app*") -or ($_.ExecutablePath -like "$newDir*"))
+    }}
     if (-not $busy) {{ break }}
     Start-Sleep -Milliseconds 500
 }}
-# 2) 清理本程序残留的浏览器/驱动进程（按安装路径精确匹配，不影响用户自己的 Chrome）
+# 2) 清理本程序残留的浏览器/驱动进程（新旧路径都匹配，不影响用户自己的 Chrome）
 Get-CimInstance Win32_Process |
-    Where-Object {{ $_.CommandLine -like "*$app*" -and
+    Where-Object {{ ($_.CommandLine -like "*$app*" -or $_.CommandLine -like "*$newDir*") -and
                     ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'headless_shell.exe' -or $_.Name -eq 'node.exe') }} |
     ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
 Start-Sleep -Milliseconds 500
 
 function Rollback {{
-    if (Test-Path (Join-Path $app "app.exe.bak")) {{
-        if (Test-Path (Join-Path $app "app.exe")) {{ Remove-Item (Join-Path $app "app.exe") -Recurse -Force -ErrorAction SilentlyContinue }}
-        Rename-Item -LiteralPath (Join-Path $app "app.exe.bak") -NewName "app.exe" -ErrorAction SilentlyContinue
-    }}
-    if (Test-Path (Join-Path $app "_internal.bak")) {{
-        if (Test-Path (Join-Path $app "_internal")) {{ Remove-Item (Join-Path $app "_internal") -Recurse -Force -ErrorAction SilentlyContinue }}
-        Rename-Item -LiteralPath (Join-Path $app "_internal.bak") -NewName "_internal" -ErrorAction SilentlyContinue
+    foreach ($n in @("app.exe", "SparkAK.exe", "_internal")) {{
+        $bak = Join-Path $app ($n + ".bak")
+        if (Test-Path $bak) {{
+            $cur = Join-Path $app $n
+            if (Test-Path $cur) {{ Remove-Item $cur -Recurse -Force -ErrorAction SilentlyContinue }}
+            Rename-Item -LiteralPath $bak -NewName $n -ErrorAction SilentlyContinue
+        }}
     }}
 }}
 
+# 3) 旧执行体改名留作回滚点
 Rename-Item -LiteralPath (Join-Path $app "app.exe") -NewName "app.exe.bak" -ErrorAction SilentlyContinue
+Rename-Item -LiteralPath (Join-Path $app "SparkAK.exe") -NewName "SparkAK.exe.bak" -ErrorAction SilentlyContinue
 Rename-Item -LiteralPath (Join-Path $app "_internal") -NewName "_internal.bak" -ErrorAction SilentlyContinue
 try {{
-    # tar.exe（Win10 1803+ 内置）优先：对深层嵌套长路径更可靠
     & "$env:SystemRoot\\System32\\tar.exe" -xf $zip -C $dest
     if ($LASTEXITCODE -ne 0) {{ throw "tar exit $LASTEXITCODE" }}
 }} catch {{
@@ -398,16 +405,40 @@ try {{
         exit 1
     }}
 }}
-# 3) 校验关键文件齐全（不完整说明解压被占用打断），不完整则回滚到旧版
-if (-not (Test-Path (Join-Path $app "app.exe")) -or
-    -not (Test-Path (Join-Path $app "_internal\\ms-playwright"))) {{
+# 4) 校验新目录关键文件齐全（不完整 = 解压被占用打断）
+if (-not (Test-Path (Join-Path $newDir "SparkAK.exe")) -or
+    -not (Test-Path (Join-Path $newDir "_internal\\ms-playwright"))) {{
     Rollback
+    if ((Test-Path $newDir) -and ($app -ne $newDir)) {{ Remove-Item $newDir -Recurse -Force -ErrorAction SilentlyContinue }}
     exit 1
 }}
-Remove-Item -LiteralPath (Join-Path $app "app.exe.bak") -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $app "_internal.bak") -Recurse -Force -ErrorAction SilentlyContinue
+# 5) 一次性迁移：旧 app/ -> SparkAK/（用户数据跟着走）
+if ($app -ne $newDir) {{
+    foreach ($n in @("data", "config.yaml", "logs")) {{
+        $srcP = Join-Path $app $n
+        $dstP = Join-Path $newDir $n
+        if (Test-Path $srcP) {{
+            if (Test-Path $dstP) {{ Remove-Item $dstP -Recurse -Force -ErrorAction SilentlyContinue }}
+            Move-Item -LiteralPath $srcP -Destination $dstP -ErrorAction SilentlyContinue
+        }}
+    }}
+    if (-not (Test-Path (Join-Path $newDir "data"))) {{
+        # 数据迁移失败：恢复旧目录原样，本次更新放弃（数据安全第一）
+        Rollback
+        if (Test-Path $newDir) {{ Remove-Item $newDir -Recurse -Force -ErrorAction SilentlyContinue }}
+        exit 1
+    }}
+}}
+# 6) 清理回滚点与旧目录
+foreach ($n in @("app.exe.bak", "SparkAK.exe.bak", "_internal.bak")) {{
+    $bak = Join-Path $app $n
+    if (Test-Path $bak) {{ Remove-Item $bak -Recurse -Force -ErrorAction SilentlyContinue }}
+}}
+if ($app -ne $newDir) {{
+    Remove-Item -LiteralPath $app -Recurse -Force -ErrorAction SilentlyContinue
+}}
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-if ("{'true' if restart else 'false'}" -eq "true") {{ Start-Process -FilePath (Join-Path $app "app.exe") }}
+if ("{'true' if restart else 'false'}" -eq "true") {{ Start-Process -FilePath (Join-Path $newDir "SparkAK.exe") }}
 Remove-Item -LiteralPath "{q(ps_path)}" -Force -ErrorAction SilentlyContinue
 exit 0
 '''

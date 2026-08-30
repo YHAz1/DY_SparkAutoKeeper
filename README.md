@@ -76,7 +76,7 @@
 
 1. 从 [Releases](https://github.com/YHAz1/DY_SparkAutoKeeper/releases) 下载 `DY_SparkAutoKeeper_vX.X.X_win64.zip`
 2. 解压到任意目录（路径建议不含特殊字符）
-3. 双击 `app.exe` 启动控制面板
+3. 双击 `SparkAK.exe` 启动控制面板（火花科技风图标）
 4. 首次使用点击「立即运行一次」，在弹出的浏览器中扫码登录
 5. 添加好友备注、设置发送时间，点击「注册自启任务」即可
 
@@ -170,7 +170,7 @@ conda run -n dy_spark python app\main.py
 ## 📁 项目结构
 
 ```
-app/
+SparkAK/（分发目录名，v1.4.4 起由 app/ 更名）
 ├─ app_launcher.py        # 统一入口（无参数=GUI / --run=执行任务）
 ├─ gui_qt.py              # PyQt5 设置面板
 ├─ main.py                # 主流程：智能调度（完成即退 / 未到点等待 / 错过补发）

@@ -14,14 +14,16 @@ import datetime
 import json
 import time
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt5.QtGui import QFont, QDesktopServices, QColor
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QVariantAnimation
+from PyQt5.QtGui import (QFont, QDesktopServices, QColor, QIcon, QPainter, QPainterPath,
+                         QConicalGradient, QPen)
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
+    QGridLayout,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
@@ -30,6 +32,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QScrollArea,
@@ -88,48 +91,60 @@ DISCLAIMER_TEXT = """【免责声明】
 8. 使用本工具即表示已阅读并同意以上全部条款"""
 
 QSS = """
-QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 17px; color: #4A4238; }
-QMainWindow, #MainRoot { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FDFBF7, stop:1 #F5EEE3); }
-QFrame#Card { background: #FFFFFF; border-radius: 16px; border: 1px solid #F1E7D9; }
-QLabel#CardTitle { font-size: 20px; font-weight: 600; color: #A9602E; }
+QWidget { font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 18px; color: #453D33; }
+QMainWindow, #MainRoot { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FBF8F2, stop:1 #F2EBDF); }
+#Header { background: #FFFDF9; border-bottom: 1px solid #EFE4D4; }
+QScrollArea { background: transparent; border: none; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QLabel#AppTitle { font-size: 20px; font-weight: 700; color: #6B5843; }
+QLabel#AppVer { font-size: 13px; color: #B9AC9C; }
+QFrame#Card { background: #FFFFFF; border-radius: 12px; border: 1px solid #EFE6D8; }
+QLabel#CardTitle { font-size: 17px; font-weight: 600; color: #9A7B54; }
 QLabel#Hint { color: #A89B8B; font-size: 15px; }
 QPushButton {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F19A5D, stop:1 #E07F3C);
-    color: #FFFFFF; border: none; border-radius: 11px;
-    padding: 12px 28px; font-size: 17px; font-weight: 600;
+    color: #FFFFFF; border: none; border-radius: 9px;
+    padding: 10px 22px; font-size: 17px; font-weight: 600;
 }
 QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E88F4F, stop:1 #D67433); }
 QPushButton:pressed { background: #C9672C; }
 QPushButton:disabled { background: #EBD5BE; color: #FFFFFF; }
 QPushButton#Ghost {
-    background: #FFFFFF; color: #B06A3B; border: 1px solid #E8CDB2; font-weight: normal;
+    background: #FFFFFF; color: #A9682F; border: 1px solid #E4C8A8; font-weight: 600;
 }
 QPushButton#Ghost:hover { background: #FBF2E7; }
 QPushButton#Danger { background: #E2937A; }
 QPushButton#Danger:hover { background: #D97F62; }
+QProgressBar#DlBar {
+    background: #F0E4D4; border: none; border-radius: 7px;
+}
+QProgressBar#DlBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #F19A5D, stop:1 #E07F3C);
+    border-radius: 7px;
+}
 QLineEdit {
-    background: #FFFEFB; border: 1px solid #EBDFD0; border-radius: 9px;
-    padding: 10px 14px; selection-background-color: #F3C9A4; font-size: 17px;
+    background: #FFFEFB; border: 1px solid #E7DACA; border-radius: 8px;
+    padding: 8px 12px; selection-background-color: #F3C9A4; font-size: 18px;
 }
 QLineEdit:focus { border: 1px solid #E8935A; background: #FFF9F1; }
 QListWidget {
-    background: #FFFEFB; border: 1px solid #EBDFD0; border-radius: 10px;
-    padding: 6px; font-size: 17px;
+    background: #FFFEFB; border: 1px solid #E7DACA; border-radius: 8px;
+    padding: 6px; font-size: 18px;
 }
-QListWidget::item { padding: 9px 12px; border-radius: 7px; margin: 1px 0; }
+QListWidget::item { padding: 7px 10px; border-radius: 6px; }
 QListWidget::item:hover { background: #FBF4EA; }
 QListWidget::item:selected { background: #F7E4CF; color: #7A4A22; }
 QPlainTextEdit {
-    background: #FFFDF9; border: 1px solid #EFE5D6; border-radius: 10px;
+    background: #FFFEFB; border: 1px solid #EDE3D3; border-radius: 8px;
     font-family: "Consolas"; font-size: 15px; color: #6B5D4F;
 }
 QSpinBox {
-    background: #FFFEFB; border: 1px solid #EBDFD0; border-radius: 8px;
-    padding: 8px 12px; font-size: 17px;
+    background: #FFFEFB; border: 1px solid #E7DACA; border-radius: 7px;
+    padding: 8px 12px; font-size: 18px;
 }
-QCheckBox { spacing: 9px; font-size: 17px; }
+QCheckBox { spacing: 8px; font-size: 18px; }
 QCheckBox::indicator {
-    width: 19px; height: 19px; border-radius: 6px;
+    width: 18px; height: 18px; border-radius: 5px;
     border: 1px solid #DFC4A6; background: #FFFEFB;
 }
 QCheckBox::indicator:hover { border-color: #E8935A; }
@@ -137,21 +152,19 @@ QCheckBox::indicator:checked {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F19A5D, stop:1 #E07F3C);
     border-color: #E07F3C;
 }
-QToolButton#FoldBtn { background: transparent; color: #B0764A; border: none; font-weight: 600; font-size: 16px; }
-QScrollArea { background: transparent; border: none; }
-QScrollArea > QWidget > QWidget { background: transparent; }
-QScrollBar:vertical { background: transparent; width: 9px; margin: 2px 0; }
-QScrollBar::handle:vertical { background: #E4D7C5; border-radius: 4px; min-height: 28px; }
+QToolButton#FoldBtn { background: transparent; color: #A9682F; border: none; font-weight: 600; font-size: 16px; }
+QLabel#BadgeGreen { color: #FFFFFF; background: #74AC74; border-radius: 12px; padding: 6px 16px; font-size: 15px; font-weight: 600; }
+QLabel#BadgeRed { color: #FFFFFF; background: #D67F76; border-radius: 12px; padding: 6px 16px; font-size: 15px; font-weight: 600; }
+QLabel#BadgeCheck { color: #FFFFFF; background: #DE9A44; border-radius: 12px; padding: 6px 16px; font-size: 15px; font-weight: 600; }
+QLabel#GuideCard { background: #FFF6E6; color: #8A5A28; border: 1px solid #F0DDC0; border-radius: 9px; padding: 11px 14px; font-size: 16px; }
+QLabel#UpdateCard { background: #FDF0D5; color: #7A4A12; border: 1px solid #E5B04C; border-radius: 9px; padding: 12px 14px; font-size: 16px; font-weight: 600; }
+QLabel#AboutText { color: #B7AA9B; font-size: 14px; }
+QToolTip { background: #FFF9F1; color: #7A6A58; border: 1px solid #E8D3B8; padding: 6px 8px; font-size: 15px; }
+QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 0; }
+QScrollBar::handle:vertical { background: #E4D7C5; border-radius: 4px; min-height: 24px; }
 QScrollBar::handle:vertical:hover { background: #D7C6B0; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-QLabel#BadgeGreen { color: #FFFFFF; background: #74AC74; border-radius: 12px; padding: 7px 19px; font-size: 16px; font-weight: 600; }
-QLabel#BadgeRed { color: #FFFFFF; background: #D67F76; border-radius: 12px; padding: 7px 19px; font-size: 16px; font-weight: 600; }
-QLabel#BadgeCheck { color: #FFFFFF; background: #DE9A44; border-radius: 12px; padding: 7px 19px; font-size: 16px; font-weight: 600; }
-QLabel#GuideCard { background: #FFF6E6; color: #8A5A28; border: 1px solid #F0DDC0; border-radius: 11px; padding: 11px 14px; font-size: 15px; }
-QLabel#UpdateCard { background: #FDF0D5; color: #7A4A12; border: 1px solid #E5B04C; border-radius: 11px; padding: 13px 16px; font-size: 16px; font-weight: 600; }
-QLabel#AboutText { color: #B7AA9B; font-size: 13px; }
-QToolTip { background: #FFF9F1; color: #7A6A58; border: 1px solid #E8D3B8; padding: 6px 8px; font-size: 14px; }
 """
 
 
@@ -266,7 +279,13 @@ class NoticeDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("DY_SparkAutoKeeper")
+        self.setWindowTitle("DY_SparkAutoKeeper")  # 标题不可改：单实例激活依赖窗口名查找
+        for _p in (os.path.join(APP_DIR, "SparkAK.ico"),
+                   os.path.join(APP_DIR, "_internal", "SparkAK.ico"),
+                   os.path.join(getattr(sys, "_MEIPASS", ""), "SparkAK.ico")):
+            if os.path.exists(_p):
+                self.setWindowIcon(QIcon(_p))
+                break
         # 去掉右上角关闭叉，只能通过按钮选择
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
         self.resize(660, 700)
@@ -302,6 +321,87 @@ class NoticeDialog(QDialog):
         lay.addLayout(row)
 
 
+class Toast(QFrame):
+    """右下角光效小弹窗：暖色跑马灯光环绕边流动，数秒后淡出。不打断任何操作。"""
+
+    _instance = None
+
+    @classmethod
+    def show_toast(cls, parent, text: str, kind: str = "info", msec: int = 4200):
+        if cls._instance is not None:
+            try:
+                cls._instance.close()
+            except Exception:  # noqa: BLE001
+                pass
+        t = cls(parent, text, kind, msec)
+        cls._instance = t
+        return t
+
+    def __init__(self, parent, text: str, kind: str, msec: int):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self._angle = 0
+        self._kind = kind
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 13, 20, 13)
+        icon = {"ok": "✅ ", "warn": "⚠️ ", "info": "💡 "}.get(kind, "")
+        self.lbl = QLabel(icon + text)
+        self.lbl.setWordWrap(True)
+        self.lbl.setStyleSheet("color: #FFF3E4; font-size: 15px; background: transparent;")
+        lay.addWidget(self.lbl)
+        self.setFixedWidth(430)
+        self.adjustSize()
+        pw, ph = parent.width(), parent.height()
+        self.move(max(12, pw - self.width() - 26), max(12, ph - self.height() - 58))
+        self.show()
+        self.raise_()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(16)
+        QTimer.singleShot(msec, self._fade)
+
+    def _tick(self):
+        self._angle = (self._angle + 8) % 360
+        self.update()
+
+    def _fade(self):
+        self._timer.stop()
+        eff = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(eff)
+        anim = QVariantAnimation(self)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setDuration(420)
+        anim.valueChanged.connect(eff.setOpacity)
+        anim.finished.connect(self.close)
+        anim.start()
+        self._anim = anim  # 保引用防 GC
+
+    def paintEvent(self, e):
+        pa = QPainter(self)
+        pa.setRenderHint(QPainter.Antialiasing)
+        r = self.rect().adjusted(3, 3, -3, -3)
+        path = QPainterPath()
+        path.addRoundedRect(r, 12, 12)
+        pa.fillPath(path, QColor(56, 46, 38, 238))
+        # 底层暗金描边
+        pa.setPen(QPen(QColor(232, 147, 90, 80), 2))
+        pa.drawPath(path)
+        # 跑马灯：锥形渐变亮弧随角度旋转，视觉上光沿边框跑一圈
+        g = QConicalGradient(self.rect().center(), -self._angle)
+        g.setColorAt(0.00, QColor(255, 224, 178, 0))
+        g.setColorAt(0.70, QColor(255, 224, 178, 0))
+        g.setColorAt(0.85, QColor(255, 224, 178, 210))
+        g.setColorAt(0.92, QColor(240, 156, 93, 255))
+        g.setColorAt(1.00, QColor(255, 224, 178, 0))
+        pa.setPen(QPen(g, 3))
+        pa.drawPath(path)
+        pa.setPen(QPen(QColor(255, 240, 220, 150), 1))
+        pa.drawPath(path)
+        pa.end()
+
+
 # ---------------- 主窗口 ----------------
 
 class SparkGUI(QMainWindow):
@@ -309,12 +409,13 @@ class SparkGUI(QMainWindow):
     sig_refresh_task = pyqtSignal()
     sig_login_settle = pyqtSignal()
     sig_login_reset = pyqtSignal()
+    sig_update_found = pyqtSignal()
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DY_SparkAutoKeeper")
-        self.resize(1100, 1240)
-        self.setMinimumSize(980, 1100)
+        self.resize(1240, 920)
+        self.setMinimumSize(1060, 720)
         self.setStyleSheet(QSS)
 
         self.cfg = load_config()
@@ -323,6 +424,7 @@ class SparkGUI(QMainWindow):
         self.sig_refresh_task.connect(self._refresh_task_state)
         self.sig_login_settle.connect(self._settle_login_badge)
         self.sig_login_reset.connect(self._on_login_worker_done)
+        self.sig_update_found.connect(self._on_update_found)
 
         self._build_ui()
         self._load_config_to_ui()
@@ -357,82 +459,110 @@ class SparkGUI(QMainWindow):
         root.setObjectName("MainRoot")
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(18, 16, 18, 14)
-        outer.setSpacing(12)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
+        # 顶栏：品牌 + 状态徽章（平铺，非卡片）
+        outer.addWidget(self._build_header())
+
+        # 新手引导条：未登录时显示在顶栏正下方
+        guide_wrap = QWidget()
+        gw = QHBoxLayout(guide_wrap)
+        gw.setContentsMargins(18, 10, 18, 0)
+        self.guide = QLabel(
+            "🧭 新手引导：① 点右上「扫码登录」完成登录  →  ② 添加好友备注  →  "
+            "③ 设定每日发送时间  →  ④ 点「注册自启任务」。登录成功后本提示自动消失。"
+        )
+        self.guide.setObjectName("GuideCard")
+        self.guide.setWordWrap(True)
+        self.guide.setAlignment(Qt.AlignCenter)
+        gw.addWidget(self.guide)
+        outer.addWidget(guide_wrap)
+        self.guide.setVisible(False)
+
+        # 双栏内容：左＝好友 + 日志；右＝设置组
+        body = QWidget()
+        bl = QHBoxLayout(body)
+        bl.setContentsMargins(18, 12, 18, 12)
+        bl.setSpacing(14)
+
+        # 滚动安全网：窗口过矮时内容滚动而非被压缩截断
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        container = QWidget()
-        container.setObjectName("ScrollContainer")
-        self.main_layout = QVBoxLayout(container)
-        self.main_layout.setContentsMargins(0, 0, 6, 0)
-        self.main_layout.setSpacing(12)
-        scroll.setWidget(container)
+        col_l = QVBoxLayout()
+        col_l.setSpacing(14)
+        col_r = QVBoxLayout()
+        col_r.setSpacing(14)
+
+        self._build_friends_card(col_l)
+        self._build_log_card(col_l)
+        self._build_send_card(col_r)
+        self._build_notify_card(col_r)
+        self._build_task_card(col_r)
+        self._build_advanced_card(col_r)
+        col_r.addStretch(1)
+
+        bl.addLayout(col_l, 11)
+        bl.addLayout(col_r, 9)
+        scroll.setWidget(body)
         outer.addWidget(scroll, 1)
 
-        self._build_status_card()
-        self._build_friends_card()
-        self._build_send_card()
-        self._build_advanced_card()
-        self._build_notify_card()
-        self._build_task_card()
-        self._build_log_card()
-
-        self.main_layout.addStretch(1)
-        # 版本号与免责声明：固定页脚，不随内容滚动
+        # 页脚：更新横幅 + 版本/免责声明
         self._build_about(outer)
 
-    def _card(self, title: str, stretch: int = 0) -> Card:
+    def _card(self, title: str, col: QVBoxLayout, stretch: int = 0) -> Card:
         c = Card(title)
-        self.main_layout.addWidget(c, stretch)
+        col.addWidget(c, stretch)
         return c
 
-    def _build_status_card(self):
-        c = self._card("")
-        row = QHBoxLayout()
-        self.badge_login = QLabel("未登录")
-        self.badge_login.setObjectName("BadgeRed")
-        self.badge_login.setAlignment(Qt.AlignCenter)
-        self.badge_login.setToolTip("登录状态来自最近一次成功登录的记录；未登录时可点旁边「扫码登录」按钮")
-        row.addWidget(self.badge_login)
-        self.badge_task = QLabel("任务未注册")
-        self.badge_task.setObjectName("BadgeRed")
-        self.badge_task.setAlignment(Qt.AlignCenter)
-        row.addWidget(self.badge_task)
-        self.badge_today = QLabel("今日未发送")
-        self.badge_today.setObjectName("BadgeRed")
-        self.badge_today.setAlignment(Qt.AlignCenter)
-        row.addWidget(self.badge_today)
+    def _badge(self, text: str, tip: str = "") -> QLabel:
+        b = QLabel(text)
+        b.setObjectName("BadgeRed")
+        b.setAlignment(Qt.AlignCenter)
+        if tip:
+            b.setToolTip(tip)
+        return b
+
+    def _build_header(self) -> QWidget:
+        h = QWidget()
+        h.setObjectName("Header")
+        lay = QHBoxLayout(h)
+        lay.setContentsMargins(18, 11, 18, 11)
+        lay.setSpacing(8)
+        title = QLabel("自动续火花")
+        title.setObjectName("AppTitle")
+        lay.addWidget(title)
+        ver = QLabel(f"v{VERSION}")
+        ver.setObjectName("AppVer")
+        lay.addWidget(ver)
+        lay.addStretch(1)
+        self.badge_login = self._badge("未登录", "登录状态来自最近一次成功登录的记录")
+        lay.addWidget(self.badge_login)
+        self.badge_task = self._badge("任务未注册")
+        lay.addWidget(self.badge_task)
+        self.badge_today = self._badge("今日未发送")
+        lay.addWidget(self.badge_today)
         # 未登录时显示的专用登录按钮（只执行扫码登录，成功后自动消失）
         self.btn_login = QPushButton("扫码登录")
         self.btn_login.setObjectName("Ghost")
         self.btn_login.setToolTip("只执行登录：弹出浏览器扫码，成功后此按钮自动消失")
         self.btn_login.clicked.connect(self._run_login_once)
         self.btn_login.setVisible(False)
-        row.addWidget(self.btn_login)
-        row.addStretch(1)
+        lay.addWidget(self.btn_login)
         self.lbl_last = QLabel("上次运行：—")
         self.lbl_last.setObjectName("Hint")
-        row.addWidget(self.lbl_last)
-        c.body().addLayout(row)
+        lay.addWidget(self.lbl_last)
+        return h
 
-        # 新手引导条：从未成功登录过时显示，登录成功后自动消失
-        self.guide = QLabel(
-            "🧭 新手引导：① 点「扫码登录」完成登录  →  ② 添加好友备注  →  "
-            "③ 设定每日发送时间  →  ④ 点「注册自启任务」。登录成功后本提示自动消失。"
-        )
-        self.guide.setObjectName("GuideCard")
-        self.guide.setWordWrap(True)
-        self.guide.setAlignment(Qt.AlignCenter)
-        c.body().addWidget(self.guide)
-
-    def _build_friends_card(self):
-        c = self._card("好友昵称列表")
+    def _build_friends_card(self, col: QVBoxLayout):
+        c = self._card("好友列表", col)
         self.list_friends = QListWidget()
-        self.list_friends.setMinimumHeight(200)
-        c.body().addWidget(self.list_friends)
+        self.list_friends.setMinimumHeight(150)
+        c.body().addWidget(self.list_friends, 1)
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.edit_friend = QLineEdit()
         self.edit_friend.setPlaceholderText("填入你对该好友的备注（需与对方有私信记录）")
         self.edit_friend.returnPressed.connect(self._add_friend)
@@ -446,41 +576,40 @@ class SparkGUI(QMainWindow):
         row.addWidget(btn_del)
         c.body().addLayout(row)
 
-    def _build_send_card(self):
-        c = self._card("发送设置")
-        grid = QVBoxLayout()
-        grid.setSpacing(8)
+    def _build_send_card(self, col: QVBoxLayout):
+        c = self._card("发送设置", col)
+        grid = QGridLayout()
+        grid.setVerticalSpacing(8)
+        grid.setHorizontalSpacing(10)
 
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("每日发送时间"))
+        lbl_t = QLabel("发送时间")
+        lbl_t.setMinimumWidth(56)
+        grid.addWidget(lbl_t, 0, 0)
         self.edit_time = QLineEdit()
         self.edit_time.setPlaceholderText("如 09:00")
-        self.edit_time.setFixedWidth(110)
-        row1.addWidget(self.edit_time)
+        self.edit_time.setFixedWidth(100)
+        grid.addWidget(self.edit_time, 0, 1)
         btn_rand = QPushButton("随机")
         btn_rand.setObjectName("Ghost")
         btn_rand.clicked.connect(self._random_time)
-        row1.addWidget(btn_rand)
-        row1.addStretch(1)
-        grid.addLayout(row1)
-        hint1 = QLabel("格式：HH:MM（24 小时制，如 09:00 / 23:30）。「随机」在 9:00-22:00 区间随机生成。保存后需重新注册自启任务生效。\n支持自动纠正：9：5、9点5、930 等写法会自动转为 09:05 / 09:30。")
-        hint1.setObjectName("Hint")
-        hint1.setWordWrap(True)
-        grid.addWidget(hint1)
+        grid.addWidget(btn_rand, 0, 2)
+        grid.setColumnStretch(1, 1)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("发送内容"))
+        lbl_x = QLabel("发送内容")
+        lbl_x.setMinimumWidth(56)
+        grid.addWidget(lbl_x, 1, 0)
         self.edit_text = QLineEdit()
         self.edit_text.setPlaceholderText("[续火花吧]")
-        row2.addWidget(self.edit_text, 1)
-        grid.addLayout(row2)
-        hint2 = QLabel("输入 [续火花吧] 会自动转为火花表情。")
-        hint2.setObjectName("Hint")
-        grid.addWidget(hint2)
+        grid.addWidget(self.edit_text, 1, 1, 1, 2)
         c.body().addLayout(grid)
 
-    def _build_advanced_card(self):
-        c = self._card("高级设置")
+        hint1 = QLabel("支持自动纠错：9点5 / 930 → 09:05 / 09:30；「随机」在 9:00-22:00 取值。改动后需重新注册任务生效。")
+        hint1.setObjectName("Hint")
+        hint1.setWordWrap(True)
+        c.body().addWidget(hint1)
+
+    def _build_advanced_card(self, col: QVBoxLayout):
+        c = self._card("高级设置", col)
         btn_fold = QToolButton()
         btn_fold.setObjectName("FoldBtn")
         btn_fold.setText("展开设置  ▾")
@@ -507,7 +636,7 @@ class SparkGUI(QMainWindow):
         v.addLayout(row_d)
 
         row_r = QHBoxLayout()
-        row_r.addWidget(QLabel("重试次数"))
+        row_r.addWidget(QLabel("发送重试次数"))
         self.spin_retry = QSpinBox()
         self.spin_retry.setRange(1, 10)
         row_r.addWidget(self.spin_retry)
@@ -515,15 +644,11 @@ class SparkGUI(QMainWindow):
         v.addLayout(row_r)
 
         self.chk_gpu = QCheckBox("启用 GPU 渲染（流畅；显卡跑模型时可关闭）")
-        hint_g = QLabel("发送前会自动检查电脑负载：CPU/显卡占用过高时先等待并定期复查，降下来才启动浏览器（load_gate 配置可调）。"
-                            "关闭 GPU 时浏览器走纯 CPU 软件渲染，完全不碰显卡。")
-        hint_g.setObjectName("Hint")
-        hint_g.setWordWrap(True)
-        v.addWidget(hint_g)
         v.addWidget(self.chk_gpu)
-        self.chk_random = QCheckBox("每日任务后自动随机明日发送时间（9:00-22:00）并更新定时任务")
+        self.chk_random = QCheckBox("每日任务后自动随机明日发送时间并更新定时任务")
         v.addWidget(self.chk_random)
-        hint_r = QLabel("勾选后：每天任务执行完自动随机生成明天的发送时间并更新自启任务（删除自启任务则不再自动更新）。\n不勾选：固定使用上方设置的发送时间。")
+        hint_r = QLabel("负载避让：发送前自动检查 CPU / 显卡占用，高负载先等待复查，降下来才运行"
+                        "（load_gate 配置可调）。关闭 GPU 时浏览器走纯 CPU 软件渲染，完全不碰显卡。")
         hint_r.setObjectName("Hint")
         hint_r.setWordWrap(True)
         v.addWidget(hint_r)
@@ -533,22 +658,24 @@ class SparkGUI(QMainWindow):
         btn_fold.toggled.connect(lambda on: (inner.setVisible(on),
                                              btn_fold.setText("收起设置  ▴" if on else "展开设置  ▾")))
 
-    def _build_notify_card(self):
-        c = self._card("远程提醒（企业微信群机器人）")
+    def _build_notify_card(self, col: QVBoxLayout):
+        c = self._card("远程提醒 · 企业微信群机器人", col)
         v = c.body()
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("每晚检查时间"))
+        row.setSpacing(10)
+        lbl = QLabel("每晚检查")
+        lbl.setMinimumWidth(56)
+        row.addWidget(lbl)
         self.edit_remind_time = QLineEdit()
         self.edit_remind_time.setPlaceholderText("如 22:30")
-        self.edit_remind_time.setFixedWidth(110)
+        self.edit_remind_time.setFixedWidth(100)
         row.addWidget(self.edit_remind_time)
         row.addStretch(1)
         v.addLayout(row)
 
         self.edit_webhook = QLineEdit()
-        self.edit_webhook.setPlaceholderText(
-            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…（留空=不推送）")
+        self.edit_webhook.setPlaceholderText("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…（留空=不推送）")
         v.addWidget(self.edit_webhook)
 
         self.chk_auto_resend = QCheckBox("晚间检查时先自动补发一次（当天错过也能抢救）")
@@ -562,43 +689,43 @@ class SparkGUI(QMainWindow):
         v.addWidget(self.chk_mention_all)
 
         hint_n = QLabel(
-            "获取方式：企业微信群 → 右键群 → 添加群机器人 → 查看机器人 → 复制 Webhook 地址。\n"
-            "逻辑：每晚「检查时间」若今天还没发送成功 → 先自动补发，仍失败才推送群提醒；"
-            "发送任务最终失败时也会立即推送。检查时间要晚于发送时间最大可能值"
-            "（随机区间上限 22:00，建议 22:00 以后，默认 22:30）。保存后需重新注册自启任务生效。")
+            "获取：企业微信群 → 右键群 → 添加群机器人 → 复制 Webhook 地址。"
+            "每晚检查未发送成功先自动补发、仍失败推群提醒；需重新注册任务生效。")
         hint_n.setObjectName("Hint")
         hint_n.setWordWrap(True)
         v.addWidget(hint_n)
 
-    def _build_task_card(self):
-        c = self._card("开机自启 + 定时任务")
+    def _build_task_card(self, col: QVBoxLayout):
+        c = self._card("定时任务", col)
         row = QHBoxLayout()
+        row.setSpacing(8)
         btn_reg = QPushButton("注册自启任务")
         btn_reg.clicked.connect(self._register_task)
         row.addWidget(btn_reg)
-        btn_unreg = QPushButton("删除任务")
-        btn_unreg.setObjectName("Danger")
-        btn_unreg.clicked.connect(self._unregister_task)
-        row.addWidget(btn_unreg)
         btn_run = QPushButton("立即运行一次")
         btn_run.setObjectName("Ghost")
         btn_run.clicked.connect(self._run_once)
         row.addWidget(btn_run)
+        btn_unreg = QPushButton("删除任务")
+        btn_unreg.setObjectName("Danger")
+        btn_unreg.clicked.connect(self._unregister_task)
+        row.addWidget(btn_unreg)
+        row.addStretch(1)
         c.body().addLayout(row)
-        hint = QLabel("注册后：开机登录自动检查（完成即退出 / 未到点等待 / 错过补发）+ 每日定时兜底"
-                      "+ 每晚提醒检查（未发成功先自动补发，再推企业微信群提醒，见「远程提醒」卡片）。")
+        hint = QLabel("注册后：开机登录自动检查 + 每日定时兜底 + 每晚提醒检查（未发成功先自动补发，再推企业微信群提醒）。")
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         c.body().addWidget(hint)
 
-    def _build_log_card(self):
-        c = self._card("运行日志", stretch=1)
+    def _build_log_card(self, col: QVBoxLayout):
+        c = self._card("运行日志", col, stretch=1)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
-        self.log_view.setMinimumHeight(200)
+        self.log_view.setMinimumHeight(140)
         c.body().addWidget(self.log_view, 1)
         row = QHBoxLayout()
+        row.setSpacing(8)
         btn_refresh = QPushButton("刷新")
         btn_refresh.setObjectName("Ghost")
         btn_refresh.clicked.connect(self._refresh_log)
@@ -608,34 +735,24 @@ class SparkGUI(QMainWindow):
         btn_clear.clicked.connect(self.log_view.clear)
         row.addWidget(btn_clear)
         row.addStretch(1)
-        lbl = QLabel(f"自动刷新 · {LOG_PATH}")
+        lbl = QLabel("自动刷新 · logs/app.log")
         lbl.setObjectName("Hint")
         row.addWidget(lbl)
         c.body().addLayout(row)
 
     def _build_about(self, outer: QVBoxLayout):
-        """固定页脚：版本号 + 检查更新 + 免责声明（始终可见），右下角署名。"""
+        """页脚：更新横幅 + 版本/免责声明/检查更新/署名。"""
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color: #F0E6DA;")
+        line.setStyleSheet("color: #EFE4D4;")
         outer.addWidget(line)
 
-        # 更新横幅：发现新版本时出现，点击立即更新
-        self.lbl_update = QLabel("")
-        self.lbl_update.setObjectName("UpdateCard")
-        self.lbl_update.setWordWrap(True)
-        self.lbl_update.setAlignment(Qt.AlignCenter)
-        self.lbl_update.setCursor(Qt.PointingHandCursor)
-        self.lbl_update.setVisible(False)
-        self.lbl_update.mousePressEvent = lambda e: self._start_update_flow()
-        outer.addWidget(self.lbl_update)
-
         row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
+        row.setContentsMargins(18, 8, 18, 10)
+        row.setSpacing(10)
         lbl = QLabel(
-            f"v{VERSION} · 自动续火花\n"
-            "免责声明：本工具仅供个人学习与娱乐交流使用，请遵守平台规则。"
-            "使用本工具存在账号风控风险，由此产生的一切后果由使用者自行承担。"
+            f"自动续火花 v{VERSION} · 仅供个人学习与娱乐交流，请遵守平台规则；"
+            "使用产生的一切后果由使用者自行承担。"
         )
         lbl.setObjectName("AboutText")
         lbl.setWordWrap(True)
@@ -645,9 +762,31 @@ class SparkGUI(QMainWindow):
         self.btn_check_update.setToolTip("检测 GitHub 上的最新版本；发现新版可一键下载并自动应用")
         self.btn_check_update.clicked.connect(self._manual_check_update)
         row.addWidget(self.btn_check_update)
+
+        # 页脚内联下载进度（下载时不弹前台窗）
+        self.dl_box = QWidget()
+        dl = QHBoxLayout(self.dl_box)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(8)
+        self.dl_bar = QProgressBar()
+        self.dl_bar.setObjectName("DlBar")
+        self.dl_bar.setFixedWidth(230)
+        self.dl_bar.setFixedHeight(14)
+        self.dl_bar.setTextVisible(False)
+        self.dl_bar.setRange(0, 100)
+        self.dl_lbl = QLabel("准备下载…")
+        self.dl_lbl.setObjectName("Hint")
+        btn_dl_cancel = QPushButton("取消")
+        btn_dl_cancel.setObjectName("Ghost")
+        btn_dl_cancel.setFixedHeight(30)
+        btn_dl_cancel.clicked.connect(self._dl_cancel)
+        dl.addWidget(self.dl_bar)
+        dl.addWidget(self.dl_lbl)
+        dl.addWidget(btn_dl_cancel)
+        self.dl_box.setVisible(False)
+        row.addWidget(self.dl_box)
         owner = QLabel("YHAz")
-        owner.setStyleSheet("color: rgba(160, 150, 140, 120); font-size: 14px; background: transparent;")
-        owner.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        owner.setStyleSheet("color: rgba(160, 150, 140, 110); font-size: 12px; background: transparent;")
         row.addWidget(owner)
         outer.addLayout(row)
 
@@ -790,6 +929,8 @@ class SparkGUI(QMainWindow):
             return
         if ver:
             self._remote_version = ver
+            if upd.is_newer(ver, VERSION):
+                self.sig_update_found.emit()
             try:
                 os.makedirs(os.path.dirname(self._UPDATE_MARK), exist_ok=True)
                 with open(self._UPDATE_MARK, "w", encoding="utf-8") as f:
@@ -806,6 +947,16 @@ class SparkGUI(QMainWindow):
         self.timer_uwait.timeout.connect(self._poll_remote)
         self.timer_uwait.start(300)
 
+    def _on_update_found(self):
+        """后台静默检测发现新版本（主线程槽）：按钮变色 + 光效提示。"""
+        ver = self._remote_version
+        if not ver or not upd.is_newer(ver, VERSION) or self._updating:
+            return
+        self.btn_check_update.setText(f"下载新版本 v{ver}")
+        self.btn_check_update.setObjectName("Primary")
+        self._restyle(self.btn_check_update)
+        Toast.show_toast(self, f"发现新版本 v{ver}（当前 v{VERSION}）：点「下载新版本」开始更新", "ok", 5000)
+
     def _poll_remote(self):
         if not self._remote_done and time.time() < getattr(self, "_wait_deadline", 0):
             return
@@ -821,28 +972,30 @@ class SparkGUI(QMainWindow):
             self._wait_deadline = time.time() + 45
             return
         self._retried = False
-        self.btn_check_update.setText("检查更新")
         self.btn_check_update.setEnabled(True)
         ver = self._remote_version
         timed_out = not self._remote_done
         if ver and upd.is_newer(ver, VERSION):
-            self.lbl_update.setText(
-                f"发现新版本 v{ver}（当前 v{VERSION}）· 点击此处立即下载并自动更新")
-            self.lbl_update.setVisible(True)
+            self.btn_check_update.setText(f"下载新版本 v{ver}")
+            self.btn_check_update.setObjectName("Primary")
+            self._restyle(self.btn_check_update)
+            Toast.show_toast(self, f"发现新版本 v{ver}（当前 v{VERSION}）：点「下载新版本」开始更新", "ok", 5000)
             return
         if getattr(self, "_manual_pending", False):
             self._manual_pending = False
             if timed_out or not ver:
-                QMessageBox.warning(self, "检查更新失败",
-                                    "无法连接版本服务器（GitHub）。\n"
-                                    "可稍后重试，或到 Releases 页面手动下载：\n"
-                                    f"https://github.com/{upd.REPO}/releases")
+                Toast.show_toast(self, "检查更新失败：无法连接版本服务器（GitHub），请稍后重试", "warn", 5000)
             else:
-                QMessageBox.information(self, "检查更新", f"当前已是最新版本 v{VERSION}")
+                Toast.show_toast(self, f"已是最新版本 v{VERSION}，无需更新", "info", 3600)
 
     def _manual_check_update(self):
-        if self._updating or self._running or getattr(self, "_login_checking", False):
-            QMessageBox.information(self, "请稍候", "当前有任务或检测正在进行，稍后再试。")
+        if getattr(self, "_updating", False) or self._running or getattr(self, "_login_running", False) \
+                or getattr(self, "_login_checking", False):
+            Toast.show_toast(self, "当前有任务或检测正在进行，稍后再试", "warn", 3200)
+            return
+        # 已检测到新版本：按钮此时就是"下载新版本"
+        if self._remote_version and upd.is_newer(self._remote_version, VERSION):
+            self._start_update_flow()
             return
         self._check_gen = getattr(self, "_check_gen", 0) + 1
         gen = self._check_gen
@@ -853,100 +1006,18 @@ class SparkGUI(QMainWindow):
         threading.Thread(target=self._check_update_worker, args=(gen,), daemon=True).start()
         self._begin_wait_remote()
 
-    # 下载源：(模式, 显示名)。mode 为 "auto"/"proxy"/镜像前缀
-    _UPDATE_SOURCES = [
-        ("auto", "自动（推荐：镜像优先，慢速自动换源）"),
-        ("proxy", "系统代理（直连 GitHub 并走系统代理）"),
-        ("https://gh.dpik.top/", "镜像 gh.dpik.top"),
-        ("https://gh-proxy.com/", "镜像 gh-proxy.com"),
-        ("https://cdn.gh-proxy.com/", "镜像 cdn.gh-proxy.com"),
-    ]
-    _UPDATE_SOURCE_MARK = os.path.join(APP_DIR, "data", "update_source.json")
-
-    def _pick_update_source(self) -> "str | None":
-        """下载源选择对话框，记住上次选择；取消返回 None。"""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("选择下载源")
-        lay = QVBoxLayout(dlg)
-        lay.setSpacing(10)
-        tip = QLabel("下载慢可随时取消，换一个源重试。\n"
-                     "「自动」模式：镜像优先，速度过低会自动切换下一个源，无需手动干预。")
-        tip.setObjectName("Hint")
-        tip.setWordWrap(True)
-        lay.addWidget(tip)
-        combo = QComboBox()
-        last = "auto"
-        try:
-            with open(self._UPDATE_SOURCE_MARK, encoding="utf-8") as f:
-                last = (json.load(f) or {}).get("last", "auto")
-        except Exception:  # noqa: BLE001
-            pass
-        for i, (mode, label) in enumerate(self._UPDATE_SOURCES):
-            combo.addItem(label, mode)
-            if mode == last:
-                combo.setCurrentIndex(i)
-        lay.addWidget(combo)
-        row = QHBoxLayout()
-        btn_cancel = QPushButton("取消")
-        btn_cancel.setObjectName("Ghost")
-        btn_ok = QPushButton("下一步")
-        row.addStretch(1)
-        row.addWidget(btn_cancel)
-        row.addWidget(btn_ok)
-        lay.addLayout(row)
-        btn_ok.clicked.connect(dlg.accept)
-        btn_cancel.clicked.connect(dlg.reject)
-        if dlg.exec_() != QDialog.Accepted:
-            return None
-        return combo.currentData()
-
-    def _update_candidates(self, ver: str, mode: str) -> "list | None":
-        """按所选模式构造 [(url, proxy), ...] 下载候选。
-        mode 为镜像前缀时返回该镜像单候选；系统代理未开启返回 None 由调用方回退自动。"""
-        direct = upd.direct_url(ver)
-        if mode == "auto":
-            cands = [(m + direct, None) for m in (
-                "https://gh.dpik.top/", "https://gh-proxy.com/", "https://cdn.gh-proxy.com/")]
-            sp = upd.system_proxy()
-            if sp:
-                cands.append((direct, sp))
-            cands.append((direct, None))
-            cands.append(("https://ghfast.top/" + direct, None))
-            return cands
-        if mode == "proxy":
-            sp = upd.system_proxy()
-            if not sp:
-                QMessageBox.information(
-                    self, "未检测到系统代理",
-                    "系统当前未开启代理（Windows 设置 → 网络和 Internet → 代理）。\n已自动切换为「自动」模式。")
-                return self._update_candidates(ver, "auto")
-            return [(direct, sp)]
-        return [(mode + direct, None)]
-
     def _start_update_flow(self, mode: "str | None" = None):
-        """点击更新横幅：选源 → 确认 → 后台下载（进度条）→ 校验 → 快照用户文件 → 脚本接力更新。"""
+        """下载新版本：选源 → 页脚进度条下载 → 校验 → 自动应用并重启。"""
         ver = self._remote_version
-        if not ver or self._updating:
+        if not ver or getattr(self, "_updating", False):
             return
-        if self._running:
-            QMessageBox.warning(self, "正在执行任务",
-                                "发送任务进行中，无法更新。\n请等待任务结束后再试。")
+        if self._running or getattr(self, "_login_running", False):
+            Toast.show_toast(self, "发送任务进行中，无法更新。请等待任务结束后再试", "warn", 4200)
             return
         if mode is None:
             mode = self._pick_update_source()
             if mode is None:
                 return
-        ret = QMessageBox.question(
-            self, "应用更新",
-            f"将下载 v{ver} 更新包（约 384MB），完成后会自动：\n"
-            "  · 关闭本程序与浏览器\n"
-            "  · 覆盖安装新版本（好友/时间/登录态/记录全部保留）\n"
-            "  · 自动重新启动程序\n\n"
-            "现在开始吗？（下载慢可随时取消并更换下载源）",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if ret != QMessageBox.Yes:
-            return
 
         try:
             os.makedirs(os.path.dirname(self._UPDATE_SOURCE_MARK), exist_ok=True)
@@ -956,17 +1027,18 @@ class SparkGUI(QMainWindow):
             pass
 
         self._updating = True
-        self.lbl_update.setVisible(False)
         dest_dir = os.path.join(tempfile.gettempdir(), "DY_SparkAutoKeeper_update")
         dest = os.path.join(dest_dir, f"DY_SparkAutoKeeper_v{ver}_win64.zip")
-        state = {"done": 0, "total": 0, "cancel": False}
+        state = {"done": 0, "total": 0, "cancel": False, "finished": False,
+                 "ok": False, "t0": time.time(), "d0": 0, "spd": 0.0}
+        self._dl_state = state
 
-        dlg = QProgressDialog("正在连接下载源…", "取消", 0, 1, self)
-        dlg.setWindowTitle("软件自更新")
-        dlg.setWindowModality(Qt.NonModal)
-        dlg.setMinimumDuration(0)
-        dlg.setAutoClose(False)
-        dlg.resize(420, 90)
+        # 页脚内联进度：隐藏检查按钮，显示进度条
+        self.btn_check_update.setVisible(False)
+        self.dl_bar.setRange(0, 100)
+        self.dl_bar.setValue(0)
+        self.dl_lbl.setText("连接下载源…")
+        self.dl_box.setVisible(True)
 
         candidates = self._update_candidates(ver, mode)
 
@@ -985,63 +1057,65 @@ class SparkGUI(QMainWindow):
             state["ok"] = ok
 
         threading.Thread(target=worker, daemon=True).start()
+        self._dl_timer = QTimer(self)
+        self._dl_timer.timeout.connect(lambda: self._poll_download(ver, dest, state))
+        self._dl_timer.start(200)
 
-        def poll():
-            total = state.get("total") or 0
-            done = state.get("done") or 0
-            if state.get("finished"):
-                poll_t.stop()
-                dlg.cancel()
-                self._after_download(ver, dest, state.get("ok", False))
-                return
-            if total > 0:
-                if dlg.maximum() != total:
-                    dlg.setRange(0, total)
-                dlg.setValue(min(done, total))
-                dlg.setLabelText(f"正在下载更新包… {done / 1048576:.0f} / {total / 1048576:.0f} MB")
-            else:
-                dlg.setRange(0, 0)  # 忙碌指示
-            if state["cancel"]:
-                dlg.cancel()
+    def _dl_cancel(self):
+        st = getattr(self, "_dl_state", None)
+        if st is not None:
+            st["cancel"] = True
+        self.dl_lbl.setText("正在取消…")
 
-        poll_t = QTimer(self)
-        poll_t.timeout.connect(poll)
-        # 取消按钮 → 设置取消标志（worker 检测后中止）
-        dlg.canceled.connect(lambda: state.__setitem__("cancel", True))
-        poll_t.start(200)
-
-    def _after_download(self, ver: str, dest: str, ok: bool):
-        if not ok:
-            self._updating = False
-            box = QMessageBox(self)
-            box.setWindowTitle("下载失败")
-            box.setText("下载失败或已取消。\n可以换一个下载源重试，或到发布页手动下载。")
-            btn_retry = box.addButton("换个源重试", QMessageBox.YesRole)
-            btn_web = box.addButton("打开下载页", QMessageBox.NoRole)
-            box.addButton("取消", QMessageBox.RejectRole)
-            box.exec_()
-            clicked = box.clickedButton()
-            if clicked is btn_retry:
-                self._start_update_flow()
-            elif clicked is btn_web:
-                QDesktopServices.openUrl(QUrl(f"https://github.com/{upd.REPO}/releases"))
+    def _poll_download(self, ver: str, dest: str, state: dict):
+        total = state["total"] or 0
+        done = state["done"] or 0
+        now = time.time()
+        dt = now - state["t0"]
+        if dt >= 1 and done > state["d0"]:
+            state["spd"] = (done - state["d0"]) / dt
+            state["t0"], state["d0"] = now, done
+        if total > 0:
+            self.dl_bar.setValue(min(100, int(done * 100 / total)))
+            sp = f" · {state['spd'] / 1048576:.1f}MB/s" if state["spd"] > 0 else ""
+            self.dl_lbl.setText(f"{done / 1048576:.0f} / {total / 1048576:.0f} MB{sp}")
+        else:
+            self.dl_bar.setRange(0, 0)
+            self.dl_lbl.setText(f"已下载 {done / 1048576:.0f} MB")
+        if not state["finished"]:
             return
+        self._dl_timer.stop()
+        self._updating = False
+        self.dl_box.setVisible(False)
+        self.btn_check_update.setVisible(True)
+        if state["ok"]:
+            self._apply_update(ver, dest)
+        else:
+            self.btn_check_update.setText("下载新版本")
+            self.btn_check_update.setObjectName("Primary")
+            self._restyle(self.btn_check_update)
+            if state["cancel"]:
+                Toast.show_toast(self, "下载已取消：点「下载新版本」可换一个源重试", "warn", 4200)
+            else:
+                Toast.show_toast(self, "下载失败：所有下载源均失败。点「下载新版本」换源重试，"
+                                       "或到 GitHub Releases 页面手动下载", "warn", 6000)
+
+    def _apply_update(self, ver: str, dest: str):
+        """校验 → 快照 → 生成接力脚本 → 短暂提示后自动应用并重启。"""
         if not upd.verify_zip(dest):
-            self._updating = False
             try:
                 os.remove(dest)
             except OSError:
                 pass
-            QMessageBox.warning(self, "更新包损坏", "下载的更新包校验未通过，已删除。\n请重试「检查更新」。")
+            Toast.show_toast(self, "更新包校验未通过，已自动删除。请点「下载新版本」重新下载", "warn", 6000)
+            self._updating = False
             return
+        self._updating = True
+        self.btn_check_update.setEnabled(False)
         upd.backup_user_files(APP_DIR)
         ps1 = upd.write_apply_script(APP_DIR, dest, restart=True)
-        QMessageBox.information(
-            self, "准备完成",
-            "更新包已就绪并通过校验。\n点击确定后将关闭程序并自动应用更新（随后自动重启）。",
-        )
-        upd.launch_apply(ps1)
-        self.close()
+        Toast.show_toast(self, "更新包校验通过：程序即将关闭并自动安装新版本，随后自动重启", "ok", 2600)
+        QTimer.singleShot(2400, lambda: (upd.launch_apply(ps1), self.close()))
 
     # ---------- 事件 ----------
 
@@ -1301,6 +1375,27 @@ class SparkGUI(QMainWindow):
                 pass
         self.badge_today.setText(f"今日 {done}/{len(friends)}" if friends else "未配置好友")
         self.badge_today.setObjectName("BadgeGreen" if friends and done == len(friends) else "BadgeRed")
+        # 上次运行：优先取发送任务的记录（last_run.json），否则取最近一次成功发送时间
+        last_txt = ""
+        try:
+            lr_path = os.path.join(APP_DIR, "data", "last_run.json")
+            if os.path.exists(lr_path):
+                with open(lr_path, encoding="utf-8") as f:
+                    lr = json.load(f) or {}
+                if lr.get("updated"):
+                    if lr.get("date") == today:
+                        last_txt = f"今天 {lr['updated']}"
+                    else:
+                        last_txt = f"{lr.get('date')} {lr['updated']}"
+        except Exception:  # noqa: BLE001
+            pass
+        if not last_txt and st:
+            try:
+                newest = max(str(v) for v in st.values() if v)
+                last_txt = ("今天 " + newest[11:]) if newest[:10] == today else newest
+            except Exception:  # noqa: BLE001
+                pass
+        self.lbl_last.setText(f"上次运行：{last_txt or '—'}")
         self._restyle(self.badge_task)
         self._restyle(self.badge_today)
         # 登录状态：检测进行中保持转圈动效；否则按标记落定显示

@@ -41,12 +41,18 @@ if ($Unregister) {
 # Resolve runner: packaged exe (app.exe --run) if present;
 # otherwise conda pythonw (dev mode). conda is only needed in dev mode,
 # so packaged builds (no conda on the machine) register without conda.
-$exe = Join-Path $appDir "app.exe"
-if (Test-Path $exe) {
-    $runner = $exe
+$exeNew = Join-Path $appDir "SparkAK.exe"
+$exeOld = Join-Path $appDir "app.exe"
+if (Test-Path $exeNew) {
+    $runner = $exeNew
     $runArg = "--run"
     $remindArg = "--remind"
-    Write-Host "OK: packaged mode detected -> $exe"
+    Write-Host "OK: packaged mode detected -> $exeNew"
+} elseif (Test-Path $exeOld) {
+    $runner = $exeOld
+    $runArg = "--run"
+    $remindArg = "--remind"
+    Write-Host "OK: legacy packaged mode (app.exe, pre-rename) -> $exeOld"
 } else {
     $condaBase = (& conda info --base | Select-Object -First 1).Trim()
     if (-not $condaBase) { throw "conda not found (dev mode requires conda env dy_spark)" }
