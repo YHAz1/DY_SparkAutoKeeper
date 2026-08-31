@@ -12,6 +12,7 @@
 """
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -83,20 +84,43 @@ def wait_for_network(log=None, timeout_min: float = 5, poll_sec: int = 15) -> bo
     return False
 
 
-def send_webhook(url: str, content: str, mention_all: bool = False,
+def parse_mentions(raw) -> list:
+    """把配置里的「群内昵称」文本解析成成员列表。
+
+    支持中文/英文逗号、顿号、分号、空格分隔，如 "张三、李四" / "张三,李四"。
+    返回去重且保序的成员名列表。"""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = [str(x) for x in raw]
+    else:
+        items = re.split(r"[,，、;；\s]+", str(raw))
+    out = []
+    for s in items:
+        s = s.strip().lstrip("@").strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def send_webhook(url: str, content: str, mentions=None,
                  log=None, timeout: int = 20) -> bool:
     """POST 文本消息到群机器人 webhook。返回 True 表示机器人确认接收（errcode==0）。
 
     企业微信机器人地址形如 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…
-    （企业微信群 → 右键 → 添加群机器人 → 查看，复制 Webhook 地址）。"""
+    （企业微信群 → 右键 → 添加群机器人 → 查看，复制 Webhook 地址）。
+
+    mentions：需要 @ 的群成员名列表（对应 text.mentioned_list）。
+    只 @ 具体成员，不再支持 @所有人；留空则纯文本推送、不 @ 任何人。"""
     url = str(url or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         if log is not None:
             log.warning("webhook 地址未配置或不合法，跳过远程提醒")
         return False
     text = {"content": str(content)}
-    if mention_all:
-        text["mentioned_list"] = ["@all"]
+    names = [str(m).strip() for m in (mentions or []) if str(m).strip()]
+    if names:
+        text["mentioned_list"] = names
     payload = {"msgtype": "text", "text": text}
 
     fd, tmp = tempfile.mkstemp(suffix=".json")
@@ -140,6 +164,9 @@ def send_webhook(url: str, content: str, mention_all: bool = False,
     return False
 
 
+_SIGN = "—— 来自 SparkAK"
+
+
 def _names(friends: list, limit: int = 30) -> str:
     fs = [str(f) for f in friends][:limit]
     s = "、".join(fs)
@@ -148,25 +175,61 @@ def _names(friends: list, limit: int = 30) -> str:
     return s
 
 
-def build_fail_text(failed: list) -> str:
-    return ("⚠️ 续火花 · 发送失败\n"
-            f"以下好友今日未发送成功：{_names(failed)}\n"
-            f"时间：{time.strftime('%H:%M')}（已自动重试仍失败）\n"
-            "请尽快打开软件手动补发，避免火花中断。")
+def _mention_line(mentions=None) -> str:
+    """消息开头的 @成员 行；无人可 @ 时返回空串。"""
+    names = [str(m).strip() for m in (mentions or []) if str(m).strip()]
+    return "@" + " @".join(names) + "\n" if names else ""
 
 
-def build_remind_text(failed: list) -> str:
-    return ("⚠️ 续火花 · 晚间检查：今日仍未发送成功！\n"
-            f"好友：{_names(failed)}\n"
-            f"时间：{time.strftime('%H:%M')}（晚间自动补发也未成功）\n"
-            "请立即手动处理，避免火花中断！")
+def _actual(actual: str = "") -> str:
+    return str(actual or "").strip() or time.strftime("%H:%M")
 
 
-def build_resend_ok_text(friends: list) -> str:
-    return (f"✅ 续火花 · 已自动补发成功\n好友：{_names(friends)}\n"
-            f"时间：{time.strftime('%H:%M')}（晚间提醒任务自动完成）")
+def build_success_text(friends: list, planned: str = "", actual: str = "",
+                       mentions=None) -> str:
+    """每日发送全部成功。"""
+    return (f"✅ 自动续火花成功\n"
+            f"{_mention_line(mentions)}"
+            f"今日火花已全部续上，共 {len(list(friends or []))} 位好友。\n"
+            f"定时任务 {planned or '—'} ｜ 实际发送 {_actual(actual)}\n"
+            f"{_SIGN}")
 
 
-def build_recover_text(friends: list) -> str:
-    return (f"✅ 续火花 · 补发成功\n好友：{_names(friends)}\n"
-            f"时间：{time.strftime('%H:%M')}（网络恢复后系统自动触发完成）")
+def build_fail_text(failed: list, planned: str = "", mentions=None) -> str:
+    """当天发送最终失败（已自动重试仍失败）。"""
+    return (f"⚠️ 自动续火花失败\n"
+            f"{_mention_line(mentions)}"
+            f"定时任务 {planned or '—'}，以下 {len(list(failed or []))} 位好友今日未发送成功：\n"
+            f"{_names(failed)}\n"
+            f"已自动重试仍未成功，请打开软件手动补发，避免火花中断。\n"
+            f"{_SIGN}")
+
+
+def build_recover_text(friends: list, planned: str = "", actual: str = "",
+                       mentions=None) -> str:
+    """网络恢复后由联网事件触发的补发成功。"""
+    return (f"✅ 自动续火花 · 补发成功\n"
+            f"{_mention_line(mentions)}"
+            f"网络恢复后已自动补发，共 {len(list(friends or []))} 位好友。\n"
+            f"定时任务 {planned or '—'} ｜ 实际补发 {_actual(actual)}\n"
+            f"{_SIGN}")
+
+
+def build_resend_ok_text(friends: list, planned: str = "", actual: str = "",
+                         mentions=None) -> str:
+    """晚间提醒任务的自动补发成功。"""
+    return (f"✅ 自动续火花 · 晚间补发成功\n"
+            f"{_mention_line(mentions)}"
+            f"晚间检查已自动补发，共 {len(list(friends or []))} 位好友。\n"
+            f"定时任务 {planned or '—'} ｜ 实际补发 {_actual(actual)}\n"
+            f"{_SIGN}")
+
+
+def build_remind_text(failed: list, planned: str = "", mentions=None) -> str:
+    """晚间检查：补发后仍未成功，火花即将中断。"""
+    return (f"⚠️ 自动续火花 · 今日仍未成功\n"
+            f"{_mention_line(mentions)}"
+            f"定时任务 {planned or '—'}，以下 {len(list(failed or []))} 位好友今日仍未发送成功：\n"
+            f"{_names(failed)}\n"
+            f"晚间自动补发也未成功，火花即将中断，请立即手动处理。\n"
+            f"{_SIGN}")

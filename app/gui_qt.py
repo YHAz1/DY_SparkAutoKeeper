@@ -85,8 +85,8 @@ USAGE_TEXT = """【使用说明】
 2. 好友列表：填入你对该好友的备注（需与对方有私信记录，会话列表可见）
 3. 发送设置：每日发送时间（HH:MM，如 09:00）；发送内容默认 [续火花吧]，输入后自动转为火花表情
 4. 点击「注册自启任务」：开机登录自动检查（完成即退出 / 未到点等待 / 错过补发），每日定时发送
-5. 远程提醒（可选）：在「远程提醒」卡片粘贴企业微信群机器人 Webhook 地址；每晚检查若当天未发送
-   成功，先自动补发一次，仍失败则在群里推送提醒（发送失败也会立即推送）
+5. 远程提醒（可选）：在「远程提醒」卡片粘贴企业微信群机器人 Webhook 地址；发送成功、失败或晚间
+   补发都会按开关推送到群里。点「推送设置」可指定要 @ 的群成员（已取消 @所有人）
 6. 运行日志：实时查看每次发送结果（app/logs/app.log）
 
 【数据与存储】
@@ -168,6 +168,9 @@ QCheckBox::indicator:checked {
     border-color: #E07F3C;
 }
 QToolButton#FoldBtn { background: transparent; color: #A9682F; border: none; font-weight: 600; font-size: 16px; }
+QToolButton#TestBtn { background: #FFF6E9; color: #A9682F; border: 1px solid #F0DDC0; border-radius: 8px; padding: 4px 6px; font-size: 14px; font-weight: 600; }
+QToolButton#TestBtn:hover { background: #FBEBD5; border-color: #E8935A; }
+QToolButton#TestBtn:disabled { color: #BCAE9B; background: #FAF6F0; border-color: #EDE3D5; }
 QLabel#BadgeGreen { color: #FFFFFF; background: #74AC74; border-radius: 12px; padding: 6px 16px; font-size: 15px; font-weight: 600; }
 QLabel#BadgeRed { color: #FFFFFF; background: #D67F76; border-radius: 12px; padding: 6px 16px; font-size: 15px; font-weight: 600; }
 QLabel#BadgeCheck { color: #FFFFFF; background: #DE9A44; border-radius: 12px; padding: 6px 16px; font-size: 15px; font-weight: 600; }
@@ -198,7 +201,8 @@ def load_config() -> dict:
             "remind_time": "22:30",
             "auto_resend": True,
             "notify_on_fail": True,
-            "mention_all": True,
+            "notify_on_success": True,
+            "mention_names": "",
         },
         "browser": {"gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
         "log": {"dir": "logs", "keep_days": 30},
@@ -430,6 +434,7 @@ class SparkGUI(QMainWindow):
     sig_login_settle = pyqtSignal()
     sig_login_reset = pyqtSignal()
     sig_update_found = pyqtSignal()
+    sig_test_push_done = pyqtSignal(bool)
 
     def __init__(self):
         super().__init__()
@@ -445,6 +450,7 @@ class SparkGUI(QMainWindow):
         self.sig_login_settle.connect(self._settle_login_badge)
         self.sig_login_reset.connect(self._on_login_worker_done)
         self.sig_update_found.connect(self._on_update_found)
+        self.sig_test_push_done.connect(self._on_test_push_done)
 
         self._build_ui()
         self._load_config_to_ui()
@@ -694,19 +700,68 @@ class SparkGUI(QMainWindow):
         row.addStretch(1)
         v.addLayout(row)
 
+        # Webhook 输入框 + 极小的「测试」标签（同一行，不额外占高度）
+        row_w = QHBoxLayout()
+        row_w.setSpacing(8)
         self.edit_webhook = QLineEdit()
         self.edit_webhook.setPlaceholderText("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…（留空=不推送）")
-        v.addWidget(self.edit_webhook)
+        row_w.addWidget(self.edit_webhook, 1)
+        self.btn_test_push = QToolButton()
+        self.btn_test_push.setObjectName("TestBtn")
+        self.btn_test_push.setText("测试")
+        self.btn_test_push.setFixedWidth(58)
+        self.btn_test_push.setToolTip("向该群推一条测试消息，验证 Webhook 与 @成员 是否可用")
+        self.btn_test_push.clicked.connect(self._test_push)
+        row_w.addWidget(self.btn_test_push)
+        v.addLayout(row_w)
 
         self.chk_auto_resend = QCheckBox("晚间检查时先自动补发一次（当天错过也能抢救）")
         self.chk_auto_resend.setChecked(True)
         v.addWidget(self.chk_auto_resend)
+
         self.chk_notify_fail = QCheckBox("当天发送最终失败时立即推送通知")
         self.chk_notify_fail.setChecked(True)
         v.addWidget(self.chk_notify_fail)
-        self.chk_mention_all = QCheckBox("提醒消息在群里 @所有人")
-        self.chk_mention_all.setChecked(True)
-        v.addWidget(self.chk_mention_all)
+
+        # 「推送设置」折叠按钮独占一行：顶替原「@所有人」复选框行，收起时卡片高度与 v1.4.4 完全一致
+        btn_fold = QToolButton()
+        btn_fold.setObjectName("FoldBtn")
+        btn_fold.setText("推送设置  ▾")
+        btn_fold.setCheckable(True)
+        btn_fold.setChecked(False)
+        # 关键：行高动态绑定到复选框实际高度，保证左右两栏底边严丝合缝（差 1px 也会被看出来）
+        btn_fold.setMinimumHeight(self.chk_notify_fail.sizeHint().height())
+        v.addWidget(btn_fold)
+
+        # 折叠区：成功推送开关 + @成员昵称（仅在展开时占高度）
+        inner = QWidget()
+        vi = QVBoxLayout(inner)
+        vi.setContentsMargins(0, 2, 0, 0)
+        vi.setSpacing(8)
+        self.chk_notify_success = QCheckBox("每日发送全部成功时也推送通知")
+        self.chk_notify_success.setChecked(True)
+        vi.addWidget(self.chk_notify_success)
+
+        row_m = QHBoxLayout()
+        row_m.setSpacing(8)
+        lbl_m = QLabel("群内昵称")
+        lbl_m.setMinimumWidth(56)
+        row_m.addWidget(lbl_m)
+        self.edit_mention = QLineEdit()
+        self.edit_mention.setPlaceholderText("你在群里的名字，如：张三（多人用顿号分隔）")
+        row_m.addWidget(self.edit_mention, 1)
+        vi.addLayout(row_m)
+
+        hint_m = QLabel("推送时 @ 这里填的成员；留空则不 @ 任何人。"
+                        "已取消 @所有人，避免打扰群里其他成员。")
+        hint_m.setObjectName("Hint")
+        hint_m.setWordWrap(True)
+        vi.addWidget(hint_m)
+
+        v.addWidget(inner)
+        inner.setVisible(False)
+        btn_fold.toggled.connect(lambda on: (inner.setVisible(on),
+                                             btn_fold.setText("推送设置  ▴" if on else "推送设置  ▾")))
 
         hint_n = QLabel(
             "获取：企业微信群 → 右键群 → 添加群机器人 → 复制 Webhook 地址。"
@@ -828,7 +883,8 @@ class SparkGUI(QMainWindow):
         self.edit_webhook.setText(str(n.get("webhook_url", "") or ""))
         self.chk_auto_resend.setChecked(bool(n.get("auto_resend", True)))
         self.chk_notify_fail.setChecked(bool(n.get("notify_on_fail", True)))
-        self.chk_mention_all.setChecked(bool(n.get("mention_all", True)))
+        self.chk_notify_success.setChecked(bool(n.get("notify_on_success", True)))
+        self.edit_mention.setText(str(n.get("mention_names", "") or ""))
 
     def _collect_config(self) -> dict:
         """从界面收集配置（不做写盘）。"""
@@ -846,7 +902,8 @@ class SparkGUI(QMainWindow):
             "remind_time": self.edit_remind_time.text().strip() or "22:30",
             "auto_resend": bool(self.chk_auto_resend.isChecked()),
             "notify_on_fail": bool(self.chk_notify_fail.isChecked()),
-            "mention_all": bool(self.chk_mention_all.isChecked()),
+            "notify_on_success": bool(self.chk_notify_success.isChecked()),
+            "mention_names": self.edit_mention.text().strip(),
         }
         return cfg
 
@@ -921,6 +978,54 @@ class SparkGUI(QMainWindow):
             return True
         QMessageBox.warning(self, "保存失败", "无法写入 config.yaml")
         return False
+
+    # ---------- 远程提醒 · 推送测试 ----------
+
+    def _test_push(self):
+        """「测试」小标签：向配置的群推一条测试消息（用成功通知的正式文案）。"""
+        if getattr(self, "_test_push_running", False):
+            return
+        webhook = self.edit_webhook.text().strip()
+        if not webhook.lower().startswith(("http://", "https://")):
+            QMessageBox.warning(
+                self, "无法测试",
+                "请先填写有效的 Webhook 地址（以 https:// 开头）。")
+            return
+        self._test_push_running = True
+        self.btn_test_push.setEnabled(False)
+        self.btn_test_push.setText("发送中")
+        threading.Thread(target=self._test_push_worker,
+                         args=(webhook,), daemon=True).start()
+
+    def _test_push_worker(self, webhook: str):
+        ok = False
+        try:
+            from modules import notify
+
+            names = notify.parse_mentions(self.edit_mention.text())
+            ok = notify.send_webhook(
+                webhook,
+                notify.build_success_text(
+                    self.cfg.get("friends", []),
+                    self.edit_time.text().strip() or "09:00",
+                    datetime.datetime.now().strftime("%H:%M"),
+                    names),
+                mentions=names)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+        self.sig_test_push_done.emit(bool(ok))
+
+    def _on_test_push_done(self, ok: bool):
+        """主线程槽：按钮就地显示结果，2.5 秒后复原，不弹窗、不占额外位置。"""
+        self._test_push_running = False
+        self.btn_test_push.setText("✓ 已发送" if ok else "✗ 失败")
+        QTimer.singleShot(2500, self._reset_test_push_btn)
+
+    def _reset_test_push_btn(self):
+        self.btn_test_push.setText("测试")
+        self.btn_test_push.setEnabled(True)
 
     # ---------- 自更新 ----------
 

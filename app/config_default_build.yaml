@@ -16,7 +16,8 @@ notify:
   remind_time: '22:30'
   auto_resend: true
   notify_on_fail: true
-  mention_all: true
+  notify_on_success: true
+  mention_names: ''
 browser:
   headless: false
   gpu: true

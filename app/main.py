@@ -82,7 +82,8 @@ _DEFAULT_CONFIG = {
         "remind_time": "22:30",
         "auto_resend": True,
         "notify_on_fail": True,
-        "mention_all": True,
+        "notify_on_success": True,
+        "mention_names": "",
     },
     "browser": {"gpu": True, "profile_dir": "data/profile", "login_timeout_sec": 180},
     "log": {"dir": "logs", "keep_days": 30},
@@ -300,19 +301,36 @@ def _run_send_phase(cfg: dict, log) -> int:
 
     ncfg = cfg.get("notify", {})
     webhook = str(ncfg.get("webhook_url") or "")
+    # 只 @ 指定群成员，不再支持 @所有人
+    mentions = notify.parse_mentions(ncfg.get("mention_names", ""))
+    # 计划时间以发送前落盘的为准（randomize 会把 send_time 改成明日值）
+    planned = str((_load_run_mark() or {}).get("planned")
+                  or cfg.get("send_time", "09:00"))
+    actual = datetime.datetime.now().strftime("%H:%M")
+
     if failed:
         if ncfg.get("notify_on_fail", True) and webhook:
             ok = notify.send_webhook(
-                ncfg["webhook_url"], notify.build_fail_text(failed),
-                mention_all=bool(ncfg.get("mention_all", True)), log=log)
+                webhook, notify.build_fail_text(failed, planned, mentions),
+                mentions=mentions, log=log)
             log.info("失败通知已推送到群" if ok else "失败通知推送失败")
         else:
             log.warning(f"今日发送失败：{failed}；网络恢复时将由联网事件自动补发")
         return 1
     if prev_failed and webhook:
+        # 此前失败、本次补发成功 → 只推"补发成功"，不叠一条普通成功，避免刷屏
         recovered = [f for f in prev_failed if not state.need_send(f)] or prev_failed
-        ok = notify.send_webhook(webhook, notify.build_recover_text(recovered), log=log)
+        ok = notify.send_webhook(
+            webhook, notify.build_recover_text(recovered, planned, actual, mentions),
+            mentions=mentions, log=log)
         log.info("补发成功通知已推送到群" if ok else "补发成功通知推送失败")
+        return 0
+    if ncfg.get("notify_on_success", True) and webhook:
+        # 每日发送全部成功：failed 为空即代表今天所有好友都已发送
+        ok = notify.send_webhook(
+            webhook, notify.build_success_text(cfg["friends"], planned, actual, mentions),
+            mentions=mentions, log=log)
+        log.info("成功通知已推送到群" if ok else "成功通知推送失败")
     return 0
 
 
@@ -365,6 +383,9 @@ def _run_remind_phase(cfg: dict, log) -> int:
             return 0
         ncfg = cfg.get("notify", {})
         webhook = str(ncfg.get("webhook_url") or "")
+        mentions = notify.parse_mentions(ncfg.get("mention_names", ""))
+        planned = _planned_today() or str(cfg.get("send_time", "09:00"))
+        actual = datetime.datetime.now().strftime("%H:%M")
         if ncfg.get("auto_resend", True):
             log.info(f"今日 {len(todo)} 位好友未发送成功，开始自动补发：{todo}")
             failed = _send_all_safe(cfg, log, todo)
@@ -372,13 +393,17 @@ def _run_remind_phase(cfg: dict, log) -> int:
             if not failed:
                 log.info("晚间自动补发成功")
                 if webhook:
-                    notify.send_webhook(webhook, notify.build_resend_ok_text(todo), log=log)
+                    ok = notify.send_webhook(
+                        webhook,
+                        notify.build_resend_ok_text(todo, planned, actual, mentions),
+                        mentions=mentions, log=log)
+                    log.info("晚间补发成功通知已推送到群" if ok else "晚间补发通知推送失败")
                 return 0
             todo = failed
         if webhook:
             ok = notify.send_webhook(
-                webhook, notify.build_remind_text(todo),
-                mention_all=bool(ncfg.get("mention_all", True)), log=log)
+                webhook, notify.build_remind_text(todo, planned, mentions),
+                mentions=mentions, log=log)
             log.info("晚间提醒已推送到群" if ok else "晚间提醒推送失败")
         else:
             log.warning(f"今日仍未发送成功：{todo}；未配置 webhook，无法远程提醒")
