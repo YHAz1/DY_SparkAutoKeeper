@@ -294,7 +294,7 @@ def _try_search_in_panel(page: Page, friend: str) -> bool:
 
         def _pick_result():
             """在搜索结果里选目标：标题文本精确等于好友名的优先，
-            避免子串误匹配（如"马锐"命中"马锐群"）；没有精确项再退回首个子串结果。"""
+            避免子串误匹配（如"张三"命中"张三丰"）；没有精确项再退回首个子串结果。"""
             cand = page.locator(SEARCH_RESULT_SEL, has_text=friend)
             n = cand.count()
             if not n:
