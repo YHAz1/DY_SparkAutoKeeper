@@ -25,12 +25,15 @@ _VERSION_SOURCES = [
 _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 
 _ASSET_TEMPLATE = "DY_SparkAutoKeeper_v{ver}_win64.zip"
+# 镜像优先、直连兜底（09-01 用户反馈：国内直连 GitHub 403MB 需 40 分钟+，体验差；
+# 实测 ghfast.top 稳定 ~1.1MB/s，gh-proxy.com 易中途断流，故按快稳程度排序）。
+# 自动模式自带速度看护（min_speed_kb/grace_sec），慢速候选仍会被自动切换。
 _MIRROR_PREFIXES = [
-    "",  # 直连
+    "https://ghfast.top/",      # 实测最稳最快
     "https://gh.dpik.top/",
-    "https://gh-proxy.com/",
     "https://cdn.gh-proxy.com/",
-    "https://ghfast.top/",
+    "https://gh-proxy.com/",    # 实测易中途断流
+    "",  # 直连兜底（境外网络下直连反而快）
 ]
 
 
