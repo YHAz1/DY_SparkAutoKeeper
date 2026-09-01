@@ -286,8 +286,18 @@ def download(candidates: list, dest_path: str, progress=None,
                 http_code = (proc.stdout.read() or b"").decode("ascii", errors="replace").strip()
             except Exception:  # noqa: BLE001
                 pass
+            # 大小校验：与 Content-Length 不一致即判定为"错误文件"（镜像返回 HTML 404 等）
+            # 提前在此处拒收，免得走到 verify_zip 才报"校验未通过"让用户困惑
+            local_size = os.path.getsize(part) if os.path.exists(part) else 0
+            if total > 0 and local_size != total:
+                _dbg(f"DL SIZE MISMATCH expect={total} got={local_size}（疑似镜像返回错误文件），换下一候选")
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                continue
             if rc == 0 and http_code in ("200", "206") and \
-                    os.path.exists(part) and os.path.getsize(part) > 0:
+                    os.path.exists(part) and local_size > 0:
                 os.replace(part, dest_path)
                 _dbg(f"DL OK {os.path.getsize(dest_path)}B")
                 return dest_path
@@ -316,9 +326,15 @@ def verify_zip(path: str) -> bool:
             for entry in ("SparkAK/SparkAK.exe", "app/app.exe"):
                 if entry in names:
                     with z.open(entry) as f:
-                        return f.read(2) == b"MZ"
+                        head = f.read(2)
+                        if head == b"MZ":
+                            return True
+                        _dbg(f"verify_zip FAIL: {entry} 首字节={head!r}，不是 MZ")
+                        return False
+            _dbg(f"verify_zip FAIL: 未找到 SparkAK/SparkAK.exe 或 app/app.exe；条目前 5：{names[:5]}")
             return False
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _dbg(f"verify_zip EXC: {type(e).__name__}:{str(e)[:80]}")
         return False
 
 
