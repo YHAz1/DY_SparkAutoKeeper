@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from version import VERSION
 from modules import sender, state, notify, loadgate
+from modules import master as masterctl
 from modules.logger import init_logger, get_logger
 from modules.login import ensure_logged_in, launch
 from modules import runlock
@@ -71,6 +72,8 @@ def _clear_session_mark(log=None) -> None:
 _DEFAULT_CONFIG = {
     "send_time": "09:00",
     "friends": [],
+    "frozen_friends": [],
+    "master": {"enabled": True, "pause_until": "", "permanent": False},
     "message": {"text": "[续火花吧]", "search_friend": False},
     "randomize_time": False,
     "delays": {"min": 1.0, "max": 3.0},
@@ -113,6 +116,44 @@ def _resolve_paths(cfg: dict) -> dict:
     prof = cfg["browser"].get("profile_dir", "data/profile")
     cfg["browser"]["profile_dir"] = os.path.join(APP_DIR, prof) if not os.path.isabs(prof) else prof
     return cfg
+
+
+def _patch_cfg(patch: dict, log=None) -> bool:
+    """只改 config.yaml 里的少量键（重读 → 改 → 写回）。
+
+    为什么不直接 dump 内存里的 cfg：运行期 _resolve_paths 已把 logs、profile
+    等相对路径换成了绝对路径，直接写回会把绝对路径固化到配置文件里，
+    用户换个目录安装就失效了。"""
+    path = os.path.join(APP_DIR, "config.yaml")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.update(patch)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        return True
+    except OSError as e:
+        if log is not None:
+            log.warning(f"写回 config.yaml 失败：{e}")
+        return False
+
+
+def _apply_master_switch(cfg: dict, log) -> bool:
+    """总开关闸门：返回 True 表示本次应跳过发送。
+
+    暂停期已过会在这里自动恢复（打开开关）并把结果写回 config.yaml。"""
+    paused, changed = masterctl.resolve(cfg)
+    if changed:
+        _patch_cfg({"master": dict(cfg["master"])}, log)
+        log.info("暂停期已过，总开关自动恢复为「开」")
+    if paused:
+        log.info(f"总开关处于关闭状态（{masterctl.status_text(cfg)}），本次不发送")
+    return paused
 
 
 def _acquire_lock():
@@ -216,7 +257,7 @@ def _send_all(cfg: dict, log, only=None) -> list:
 
     发送前先等网络可用（睡眠唤醒后 Wi-Fi 重连慢是漏发主因）。
     返回本轮仍失败的好友列表（成功者已写入 state.json）。"""
-    base = list(only) if only is not None else list(cfg["friends"])
+    base = list(only) if only is not None else masterctl.active_friends(cfg)
     todo = [f for f in base if state.need_send(f)]
     if not todo:
         log.info("本轮没有需要发送的好友")
@@ -274,7 +315,7 @@ def _send_all_safe(cfg: dict, log, only=None) -> list:
         return _send_all(cfg, log, only)
     except Exception as e:  # noqa: BLE001
         log.error(f"本轮发送过程异常：{e}")
-        base = list(only) if only is not None else list(cfg["friends"])
+        base = list(only) if only is not None else masterctl.active_friends(cfg)
         return [f for f in base if state.need_send(f)]
 
 
@@ -285,7 +326,7 @@ def _run_send_phase(cfg: dict, log) -> int:
     （register_task.ps1 订阅 NetworkProfile/Operational 10000）会在网络恢复的
     瞬间重新拉起本程序补发，晚间提醒任务（--remind）再兜底一次。
     返回退出码：0=全部成功，1=仍有好友失败。"""
-    todo_now = [f for f in cfg["friends"] if state.need_send(f)]
+    todo_now = [f for f in masterctl.active_friends(cfg) if state.need_send(f)]
     if not todo_now:
         log.info("今天所有好友均已发送，无需操作")
         return 0
@@ -327,8 +368,10 @@ def _run_send_phase(cfg: dict, log) -> int:
         return 0
     if ncfg.get("notify_on_success", True) and webhook:
         # 每日发送全部成功：failed 为空即代表今天所有好友都已发送
+        # 这里报的是"实际会发送的好友"（冻结的不算），避免群里看到的人数比实际多
         ok = notify.send_webhook(
-            webhook, notify.build_success_text(cfg["friends"], planned, actual, mentions),
+            webhook, notify.build_success_text(
+                masterctl.active_friends(cfg), planned, actual, mentions),
             mentions=mentions, log=log)
         log.info("成功通知已推送到群" if ok else "成功通知推送失败")
     return 0
@@ -340,9 +383,9 @@ def _run_remind_phase(cfg: dict, log) -> int:
     今日仍有好友未发送 → 等计划时间+宽限期过后：
     ① 先自动补发一次（网络早恢复了的话直接抢救成功）；
     ② 仍失败则推送企业微信群机器人提醒。"""
-    friends = cfg["friends"]
+    friends = masterctl.active_friends(cfg)
     if not friends:
-        log.info("未配置好友，提醒任务无需执行")
+        log.info("未配置好友（或好友全部处于冻结状态），提醒任务无需执行")
         return 0
     todo = [f for f in friends if state.need_send(f)]
     if not todo:
@@ -471,13 +514,22 @@ def main(mode: str = "run") -> int:
     # 去重保序：重复好友会导致重复发送
     cfg["friends"] = list(dict.fromkeys(
         str(f).strip() for f in (cfg.get("friends") or []) if str(f).strip()))
+    masterctl.normalize(cfg)
+    # 冻结名单：仍留在好友列表里，但不参与发送
+    frozen = masterctl.frozen_set(cfg)
+
+    # 登录模式不受总开关影响（用户可能就是为了登录才点的）
+    if mode != "login" and _apply_master_switch(cfg, log):
+        return 0
 
     if mode == "remind":
         return _run_remind_phase(cfg, log)
     if mode == "login":
         return _run_login_phase(cfg, log)
 
-    friends = cfg["friends"]
+    friends = masterctl.active_friends(cfg)
+    if frozen:
+        log.info(f"已冻结（本次不发送）：{sorted(frozen)}")
     if not friends:
         log.info("尚未配置好友：本次运行将只进行登录检查/扫码登录")
 
@@ -497,7 +549,10 @@ def main(mode: str = "run") -> int:
                 log.info("今天所有好友均已发送，无需操作")
                 return 0
             if os.path.exists(_session_mark()):
-                log.info("已登录但尚未配置好友，无需发送；请在面板添加好友后点「注册自启任务」")
+                if frozen:
+                    log.info(f"已登录，但好友全部处于冻结状态：{sorted(frozen)}；本次不发送")
+                else:
+                    log.info("已登录但尚未配置好友，无需发送；请在面板添加好友后点「注册自启任务」")
                 return 0
             log.info("首次使用：将打开浏览器等待扫码登录（完成后即可在面板配置好友与时间）")
             # 继续往下走"仅登录"流程

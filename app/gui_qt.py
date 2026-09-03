@@ -14,11 +14,13 @@ import datetime
 import json
 import time
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal, QVariantAnimation, QRectF
-from PyQt5.QtGui import (QFont, QDesktopServices, QColor, QIcon, QFontMetrics, QPainter, QPainterPath,
-                         QConicalGradient, QPen)
+from PyQt5.QtCore import (QEasingCurve, QRect, QRectF, QSize, Qt, QTimer, QUrl, QVariantAnimation,
+                          pyqtSignal)
+from PyQt5.QtGui import (QConicalGradient, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon,
+                         QColor, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient)
 from PyQt5.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -30,13 +32,16 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QProgressDialog,
     QPushButton,
+    QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -46,6 +51,7 @@ from PyQt5.QtWidgets import (
 import yaml
 
 from modules import updater as upd
+from modules import master as masterctl
 
 
 def _app_dir() -> str:
@@ -177,6 +183,41 @@ QLabel#BadgeCheck { color: #FFFFFF; background: #DE9A44; border-radius: 12px; pa
 QLabel#GuideCard { background: #FFF6E6; color: #8A5A28; border: 1px solid #F0DDC0; border-radius: 9px; padding: 11px 14px; font-size: 16px; }
 QLabel#UpdateCard { background: #FDF0D5; color: #7A4A12; border: 1px solid #E5B04C; border-radius: 9px; padding: 12px 14px; font-size: 16px; font-weight: 600; }
 QLabel#AboutText { color: #A99C8C; font-size: 16px; }
+/* 好友行末的冻结标记：硬核风——透明底、直角细框、等宽粗体、透灰 */
+QLabel#StopBadge {
+    background: transparent;
+    border: 1px solid rgba(160, 150, 134, 150);
+    border-radius: 0px;
+    color: rgba(148, 138, 122, 205);
+    padding: 0px 7px;
+    font-family: "Consolas";
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#MasterPaused { color: #C8794A; font-size: 14px; font-weight: 600; background: transparent; }
+/* 暂停弹窗：暖白卡片 + 杏橙强调，与主题同一套色 */
+QDialog#PauseDialog { background: #FBF7F0; }
+QDialog#PauseDialog QLabel#OptTitle { font-size: 17px; color: #5F4E3C; }
+QDialog#PauseDialog QLabel#OptHint { color: #A89B8B; font-size: 14px; }
+QDialog#PauseDialog QLabel#Preview {
+    background: #FFF6E6; color: #8A5A28; border: 1px solid #F0DDC0;
+    border-radius: 9px; padding: 9px 12px; font-size: 15px;
+}
+QDialog#PauseDialog QFrame#OptRow {
+    background: #FFFFFF; border: 1px solid #EFE6D8; border-radius: 10px;
+}
+QDialog#PauseDialog QFrame#OptRow[selected="true"] {
+    border: 1px solid #E8935A; background: #FFFAF2;
+}
+QRadioButton { spacing: 10px; font-size: 17px; color: #5F4E3C; }
+QRadioButton::indicator {
+    width: 18px; height: 18px; border-radius: 9px;
+    border: 1px solid #DFC4A6; background: #FFFEFB;
+}
+QRadioButton::indicator:hover { border-color: #E8935A; }
+QRadioButton::indicator:checked { border: 5px solid #E8935A; background: #FFFFFF; }
+QSpinBox#DaySpin { background: #FFFEFB; border: 1px solid #E7DACA; border-radius: 7px; padding: 4px 10px; font-size: 16px; min-width: 62px; }
 QToolTip { background: #FFF9F1; color: #7A6A58; border: 1px solid #E8D3B8; padding: 6px 8px; font-size: 15px; }
 QScrollBar:vertical { background: transparent; width: 8px; margin: 2px 0; }
 QScrollBar::handle:vertical { background: #E4D7C5; border-radius: 4px; min-height: 24px; }
@@ -192,6 +233,8 @@ def load_config() -> dict:
     default = {
         "send_time": "09:00",
         "friends": [],
+        "frozen_friends": [],
+        "master": {"enabled": True, "pause_until": "", "permanent": False},
         "message": {"text": "[续火花吧]", "search_friend": False},
         "randomize_time": False,
         "delays": {"min": 1.5, "max": 3.5},
@@ -359,12 +402,17 @@ class Toast(QFrame):
         lay.setContentsMargins(16, 8, 16, 8)
         icon = {"ok": "✅ ", "warn": "⚠️ ", "info": "💡 "}.get(kind, "")
         self.lbl = QLabel(icon + text)
-        self.lbl.setWordWrap(True)
+        self.lbl.setWordWrap(False)  # 固定单行：高度恒定，字多只加宽
         self.lbl.setStyleSheet("color: #3E362C; font-size: 17px; background: transparent;")
         lay.addWidget(self.lbl)
-        text_w = QFontMetrics(self.lbl.font()).horizontalAdvance(self.lbl.text())
-        self.setFixedWidth(max(230, min(760, text_w + 46)))  # 单行宽度自适应，超长自然折行
+        # 高度固定（与「已是最新版本」那条更新提示完全等高，和页脚适配），
+        # 宽度随文案长度伸缩；字体固定 17px 不变
+        f = self.lbl.font()
+        f.setPixelSize(17)  # 与样式表 font-size:17px 一致，保证测量准
+        text_w = QFontMetrics(f).horizontalAdvance(icon + text)
+        self.setFixedWidth(max(230, min(parent.width() - 40, text_w + 46)))
         self.adjustSize()
+        self.setFixedHeight(self.sizeHint().height())
         # 与「检查更新」按钮等高、放在其左侧；无锚点时回退右下角
         anchor = getattr(parent, "btn_check_update", None)
         if anchor is not None:
@@ -424,6 +472,288 @@ class Toast(QFrame):
         pa.setPen(QPen(g, 3))
         pa.drawPath(path)
         pa.end()
+
+
+# ---------------- 总开关控件 ----------------
+
+class ToggleSwitch(QWidget):
+    """暖橙主题的拨动开关（总开关用）。
+
+    只管"外观 + 表达意图"：点一下发出 clicked(期望状态)，由外部决定要不要真的切；
+    外部确认后调 setChecked() 才会真正变位。这样"拨到关要弹窗选暂停时长，
+    取消则原地复原"的交互才成立。"""
+
+    clicked = pyqtSignal(bool)
+
+    _W, _H, _PAD = 54, 28, 3
+
+    def __init__(self, checked: bool = True, parent=None):
+        super().__init__(parent)
+        self._checked = bool(checked)
+        self._pos = 1.0 if self._checked else 0.0
+        self._hover = False
+        self.setFixedSize(self._W, self._H)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(170)
+        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._anim.valueChanged.connect(self._on_anim)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._W, self._H)
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, on: bool) -> None:
+        """把开关拨到指定状态（带缓动动画）。"""
+        on = bool(on)
+        target = 1.0 if on else 0.0
+        self._checked = on
+        if abs(self._pos - target) < 0.001:
+            self._pos = target
+            self.update()
+            return
+        self._anim.stop()
+        self._anim.setStartValue(float(self._pos))
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _on_anim(self, v):
+        self._pos = float(v)
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.pos()):
+            self.clicked.emit(not self._checked)
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self.clicked.emit(not self._checked)
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        track = QRectF(1.0, 1.0, self._W - 2, self._H - 2)
+        radius = track.height() / 2.0
+
+        g = QLinearGradient(track.left(), track.top(), track.left(), track.bottom())
+        if self._checked:
+            g.setColorAt(0.0, QColor("#F3A263"))
+            g.setColorAt(1.0, QColor("#DF7C39"))
+        else:
+            g.setColorAt(0.0, QColor("#EDE6DA"))
+            g.setColorAt(1.0, QColor("#DDD4C5"))
+        p.setPen(Qt.NoPen)
+        p.setBrush(g)
+        p.drawRoundedRect(track, radius, radius)
+
+        edge = QColor("#D0742F") if self._checked else QColor("#CFC5B4")
+        if self._hover:
+            edge = QColor("#B8631F") if self._checked else QColor("#B9AEA0")
+        p.setPen(QPen(edge, 1.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(0.5, 0.5, self._W - 1, self._H - 1), radius, radius)
+
+        d = float(self._H - 2 * self._PAD - 2)
+        x = self._PAD + 1 + self._pos * (self._W - 2 * self._PAD - 2 - d)
+        y = (self._H - d) / 2.0
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(90, 70, 50, 36))
+        p.drawEllipse(QRectF(x + 0.6, y + 1.6, d, d))  # 极淡投影，让钮"浮"一点
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawEllipse(QRectF(x, y, d, d))
+        if not self._checked:
+            # 关态在钮心点一颗暖灰小点，避免纯白显得空洞
+            p.setBrush(QColor("#C9BFAE"))
+            p.drawEllipse(QRectF(x + d / 2 - 2.2, y + d / 2 - 2.2, 4.4, 4.4))
+        p.end()
+
+
+class _OptRow(QFrame):
+    """暂停弹窗里的选项行：点整行任意位置都能选中（不只是那颗小圆点）。"""
+
+    def __init__(self, radio: QRadioButton):
+        super().__init__()
+        self.setObjectName("OptRow")
+        self.setProperty("selected", "false")
+        self._radio = radio
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+
+    def mousePressEvent(self, e):
+        if not self._radio.isChecked():
+            self._radio.click()
+        super().mousePressEvent(e)
+
+
+_WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+class PauseDialog(QDialog):
+    """关闭总开关时选择暂停时长：1 天 / 自定义 N 天 / 永久关闭。"""
+
+    def __init__(self, parent=None, default_days: int = 3):
+        super().__init__(parent)
+        self.setObjectName("PauseDialog")
+        self.setWindowTitle("暂停续火花")
+        self.setModal(True)
+        self.setFixedWidth(430)
+        if parent is not None and parent.styleSheet():
+            self.setStyleSheet(parent.styleSheet())  # 继承主题 QSS，弹窗与主界面同源
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 16)
+        outer.setSpacing(11)
+
+        title = QLabel("暂停续火花")
+        title.setStyleSheet("font-size: 19px; font-weight: 700; color: #6B5843;")
+        outer.addWidget(title)
+        sub = QLabel("暂停期间不会给任何好友发送消息；定时任务照常运行，但会直接跳过。")
+        sub.setObjectName("OptHint")
+        sub.setWordWrap(True)
+        outer.addWidget(sub)
+
+        self.group = QButtonGroup(self)
+        self._ready = False  # 构造期 True 之前：spin 初始 setValue 不触发选项抢选
+        # 预览 Label必须先于选项行创建：spin 的 valueChanged 回调（_sync →
+        # _update_preview）会在下方 setValue 时立刻触发，若 lbl_preview 尚不存在
+        # 会抛 AttributeError，PyQt5 对槽内未捕获异常直接 qFatal 中止整个进程
+        # （实测表现为：总开关拨到"关"的瞬间 SparkAK.exe 无声闪退）
+        self.lbl_preview = QLabel("")
+        self.lbl_preview.setObjectName("Preview")
+        self.lbl_preview.setWordWrap(True)
+        self.rb_one = self._add_row(outer, "暂停 1 天", "今天不发送，明天自动恢复")
+        self.rb_days, self.spin_days = self._add_days_row(outer)
+        self.rb_forever = self._add_row(
+            outer, "永久关闭", "一直不发送，直到你手动把总开关拨回开启")
+        self.rb_one.setChecked(True)
+        self.spin_days.setValue(max(1, min(365, int(default_days or 3))))
+        self.group.buttonClicked.connect(self._sync)
+
+        outer.addWidget(self.lbl_preview)  # 视觉顺序：三个选项行之后、按钮行之前
+
+        row_b = QHBoxLayout()
+        row_b.setSpacing(10)
+        row_b.addStretch(1)
+        b_cancel = QPushButton("取消")
+        b_cancel.setObjectName("Ghost")
+        b_cancel.clicked.connect(self.reject)
+        row_b.addWidget(b_cancel)
+        b_ok = QPushButton("确定暂停")
+        b_ok.setDefault(True)
+        b_ok.clicked.connect(self.accept)
+        row_b.addWidget(b_ok)
+        outer.addLayout(row_b)
+
+        self._ready = True
+        self._sync()
+
+    # ---- 选项行构造 ----
+
+    def _row_frame(self, radio: QRadioButton, outer: QVBoxLayout) -> QHBoxLayout:
+        row = _OptRow(radio)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(13, 10, 13, 10)
+        lay.setSpacing(11)
+        lay.addWidget(radio)
+        self.group.addButton(radio)
+        outer.addWidget(row)
+        self._rows = getattr(self, "_rows", [])
+        self._rows.append((radio, row))
+        return lay
+
+    def _add_row(self, outer: QVBoxLayout, title: str, hint: str) -> QRadioButton:
+        radio = QRadioButton()
+        radio.setText("")
+        lay = self._row_frame(radio, outer)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        t = QLabel(title)
+        t.setObjectName("OptTitle")
+        col.addWidget(t)
+        h = QLabel(hint)
+        h.setObjectName("OptHint")
+        h.setWordWrap(True)
+        col.addWidget(h)
+        lay.addLayout(col, 1)
+        return radio
+
+    def _add_days_row(self, outer: QVBoxLayout):
+        radio = QRadioButton()
+        radio.setText("")
+        lay = self._row_frame(radio, outer)
+        col = QVBoxLayout()
+        col.setSpacing(3)
+        line = QHBoxLayout()
+        line.setSpacing(7)
+        t1 = QLabel("暂停")
+        t1.setObjectName("OptTitle")
+        line.addWidget(t1)
+        spin = QSpinBox()
+        spin.setObjectName("DaySpin")
+        spin.setRange(1, 365)
+        spin.setSuffix(" 天")
+        # 只在"用户改数字"时自动选中多天选项；构造期的初始 setValue 不抢默认选中
+        # （默认应停在"暂停 1 天"，否则弹窗一打开就变成"暂停 N 天"）
+        spin.valueChanged.connect(
+            lambda _v: (radio.setChecked(True), self._sync()) if self._ready else None)
+        line.addWidget(spin)
+        line.addStretch(1)
+        col.addLayout(line)
+        h = QLabel("想停几天就填几天，到期自动恢复")
+        h.setObjectName("OptHint")
+        h.setWordWrap(True)
+        col.addWidget(h)
+        lay.addLayout(col, 1)
+        return radio, spin
+
+    # ---- 状态同步 ----
+
+    def _sync(self):
+        for radio, row in getattr(self, "_rows", []):
+            on = "true" if radio.isChecked() else "false"
+            if row.property("selected") != on:
+                row.setProperty("selected", on)
+                row.style().unpolish(row)
+                row.style().polish(row)
+        self.spin_days.setEnabled(self.rb_days.isChecked())
+        self._update_preview()
+
+    def _update_preview(self):
+        if self.rb_forever.isChecked():
+            self.lbl_preview.setText("⏸ 将一直暂停 · 需要你手动把总开关拨回「开」才恢复")
+            return
+        n = 1 if self.rb_one.isChecked() else int(self.spin_days.value())
+        back = datetime.date.today() + datetime.timedelta(days=n)
+        self.lbl_preview.setText(
+            f"⏸ 暂停 {n} 天 · {back:%m-%d}（{_WEEKDAY_CN[back.weekday()]}）自动恢复发送")
+
+    def choice(self):
+        """返回用户选择：('days', n) / ('forever', None)；未选返回 None。"""
+        if self.rb_one.isChecked():
+            return ("days", 1)
+        if self.rb_days.isChecked():
+            return ("days", int(self.spin_days.value()))
+        if self.rb_forever.isChecked():
+            return ("forever", None)
+        return None
 
 
 # ---------------- 主窗口 ----------------
@@ -564,6 +894,18 @@ class SparkGUI(QMainWindow):
         ver.setObjectName("AppVer")
         lay.addWidget(ver)
         lay.addStretch(1)
+        # 总开关（角落嵌入式）：不占正文卡片，保持原一页排版不变
+        sw_lbl = QLabel("总开关")
+        sw_lbl.setStyleSheet(
+            "color:#8A7A66; font-size:15px; font-weight:600; background:transparent;")
+        lay.addWidget(sw_lbl)
+        self.switch_master = ToggleSwitch(True)
+        self.switch_master.setToolTip("续火花总开关：拨到「关」可选择暂停 1 天、多天或永久")
+        self.switch_master.clicked.connect(self._on_master_toggle)
+        lay.addWidget(self.switch_master, 0, Qt.AlignVCenter)
+        self.lbl_master_status = QLabel("")
+        self.lbl_master_status.setObjectName("MasterPaused")
+        lay.addWidget(self.lbl_master_status)
         self.badge_login = self._badge("未登录", "登录状态来自最近一次成功登录的记录")
         lay.addWidget(self.badge_login)
         self.badge_task = self._badge("任务未注册")
@@ -586,6 +928,8 @@ class SparkGUI(QMainWindow):
         c = self._card("好友列表", col)
         self.list_friends = QListWidget()
         self.list_friends.setMinimumHeight(150)
+        # 双击好友行 = 冻结 / 解冻（冻结者仍留在列表里，但不给 TA 发送）
+        self.list_friends.itemDoubleClicked.connect(self._toggle_freeze)
         c.body().addWidget(self.list_friends, 1)
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -601,6 +945,10 @@ class SparkGUI(QMainWindow):
         btn_del.clicked.connect(self._del_friend)
         row.addWidget(btn_del)
         c.body().addLayout(row)
+        hint = QLabel("双击某一行可冻结该好友（不再发送，行末出现 stop 标记）；再双击一次取消。")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        c.body().addWidget(hint)
 
     def _build_send_card(self, col: QVBoxLayout):
         c = self._card("发送设置", col)
@@ -715,7 +1063,7 @@ class SparkGUI(QMainWindow):
         row_w.addWidget(self.btn_test_push)
         v.addLayout(row_w)
 
-        self.chk_auto_resend = QCheckBox("晚间检查时先自动补发一次（当天错过也能抢救）")
+        self.chk_auto_resend = QCheckBox("晚间检查时先自动补发一次")
         self.chk_auto_resend.setChecked(True)
         v.addWidget(self.chk_auto_resend)
 
@@ -871,7 +1219,8 @@ class SparkGUI(QMainWindow):
         self.edit_text.setText(self.cfg["message"].get("text", "[续火花吧]"))
         self.list_friends.clear()
         for name in self.cfg.get("friends", []):
-            self.list_friends.addItem(name)
+            self._add_friend_item(name)
+        self._refresh_friend_rows()
         d = self.cfg.get("delays", {})
         self.spin_dmin.setValue(int(d.get("min", 1.5)))
         self.spin_dmax.setValue(int(d.get("max", 3.5)))
@@ -885,12 +1234,135 @@ class SparkGUI(QMainWindow):
         self.chk_notify_fail.setChecked(bool(n.get("notify_on_fail", True)))
         self.chk_notify_success.setChecked(bool(n.get("notify_on_success", True)))
         self.edit_mention.setText(str(n.get("mention_names", "") or ""))
+        self._refresh_master_ui()
+
+    # ---------- 总开关 / 好友冻结 ----------
+
+    def _refresh_master_ui(self):
+        """按当前配置刷新顶栏总开关（含"暂停期已过自动恢复"）。
+
+        开启时不占文案（任务注册/今日状态已有徽章表达）；仅在暂停期
+        显示简短提示，恢复日期一律按"暂停截止日 + 1 天"口径。"""
+        masterctl.normalize(self.cfg)
+        paused, changed = masterctl.resolve(self.cfg)
+        if changed:  # 暂停期已过：自动恢复并落盘
+            save_config(self.cfg)
+        self.switch_master.setChecked(not paused)
+        self.lbl_master_status.setText(
+            "" if not paused else self._master_pause_hint())
+        self._restyle(self.lbl_master_status)
+
+    def _master_pause_hint(self) -> str:
+        """暂停期的简短顶栏提示。"""
+        m = self.cfg.get("master") or {}
+        if m.get("permanent"):
+            return "已永久暂停"
+        until = masterctl.resume_date(self.cfg)
+        if until is None:
+            return "已暂停"
+        left = masterctl.remaining_days(self.cfg)
+        when = until + datetime.timedelta(days=1)
+        return f"已暂停 {left} 天 · {when:%m-%d} 恢复"
+
+    def _on_master_toggle(self, want_on: bool):
+        """总开关被拨动：开=立即恢复；关=弹窗选暂停时长，取消则原地不动。"""
+        if want_on:
+            masterctl.resume(self.cfg)
+            self._refresh_master_ui()
+            self._persist_config()
+            Toast.show_toast(self, "已开启续火花", kind="ok")
+            return
+        dlg = PauseDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            self.switch_master.setChecked(True)  # 取消：开关拨回原位
+            return
+        choice = dlg.choice()
+        if choice is None:
+            self.switch_master.setChecked(True)
+            return
+        if choice[0] == "forever":
+            masterctl.pause_forever(self.cfg)
+            tip = "已永久暂停 · 拨回开关即可恢复"
+        else:
+            # 暂停 N 天（含今天）：恢复日 = 截止日 + 1，如 9/3 停 1 天 → 9/4 恢复
+            until = masterctl.pause_days(self.cfg, choice[1])
+            back = datetime.date.fromisoformat(until) + datetime.timedelta(days=1)
+            tip = (f"已暂停 {choice[1]} 天 · "
+                   f"{back:%m-%d}（{_WEEKDAY_CN[back.weekday()]}）自动恢复")
+        self._refresh_master_ui()
+        self._persist_config()
+        Toast.show_toast(self, tip, kind="info", lap_ms=2600)
+
+    def _persist_config(self) -> bool:
+        """静默落盘（不走时间/webhook 校验）：用于总开关、冻结这类即时生效的小改动。"""
+        self._collect_config()
+        return save_config(self.cfg)
+
+    @staticmethod
+    def _friend_name(item) -> str:
+        """好友条目的真实名字存 Qt.UserRole（显示文字为空，避免双层重影）。"""
+        return str(item.data(Qt.UserRole) or "")
+
+    def _add_friend_item(self, name: str):
+        """新建好友条目：显示文字为空，名字放 UserRole。"""
+        it = QListWidgetItem()
+        it.setData(Qt.UserRole, str(name))
+        self.list_friends.addItem(it)
+
+    def _refresh_friend_rows(self):
+        """重建好友行：冻结的好友在名字行末挂一个灰色 stop 标记。
+
+        条目显示文字必须为空：行内控件负责画名字，否则条目自带文字和
+        控件文字双层叠加、错位重影（用户截图确诊的"乱码删除线"）。"""
+        frozen = masterctl.frozen_set(self.cfg)
+        for i in range(self.list_friends.count()):
+            item = self.list_friends.item(i)
+            name = self._friend_name(item)
+            is_froz = name in frozen
+            w = QWidget()
+            lay = QHBoxLayout(w)
+            # 完全复刻 v1.4.6 纯文本条目的指标：QSS item padding 7px 10px →
+            # 行高 38px、文字距列表左缘 16px（列表 padding 6 + 此处 10）
+            lay.setContentsMargins(10, 0, 10, 0)
+            lay.setSpacing(8)
+            lbl = QLabel(name)
+            # 与 v1.4.6 及之前的纯文本条目完全同款：列表 QSS 18px 同源，避免行内
+            # 控件字体回落造成"字体变了"的观感差异
+            lbl.setStyleSheet("background: transparent; font-size: 18px;")
+            lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            lay.addWidget(lbl, 1)
+            if is_froz:
+                badge = QLabel("stop")
+                badge.setObjectName("StopBadge")
+                badge.setAlignment(Qt.AlignCenter)
+                badge.setFixedHeight(20)
+                lay.addWidget(badge, 0, Qt.AlignVCenter)
+            item.setSizeHint(QSize(0, 38))
+            self.list_friends.setItemWidget(item, w)
+            item.setToolTip("已冻结 · 双击可取消冻结（恢复发送）" if is_froz
+                            else "双击可冻结该好友（不再发送）")
+
+    def _toggle_freeze(self, item):
+        """双击好友行：切换冻结状态并立即写盘。"""
+        name = self._friend_name(item).strip()
+        if not name:
+            return
+        frozen = masterctl.toggle_freeze(self.cfg, name)
+        self._refresh_friend_rows()
+        self._persist_config()
+        self._refresh_task_state()
+        Toast.show_toast(
+            self,
+            f"已冻结「{name}」· 不再发送，双击可取消" if frozen
+            else f"已取消冻结「{name}」· 恢复发送",
+            kind="ok" if frozen else "info", lap_ms=2400)
 
     def _collect_config(self) -> dict:
         """从界面收集配置（不做写盘）。"""
         cfg = self.cfg
+        masterctl.normalize(cfg)  # 保证总开关/冻结字段始终写回完整结构
         cfg["send_time"] = self.edit_time.text().strip()
-        cfg["friends"] = [self.list_friends.item(i).text() for i in range(self.list_friends.count())]
+        cfg["friends"] = [self._friend_name(self.list_friends.item(i)) for i in range(self.list_friends.count())]
         cfg["message"]["text"] = self.edit_text.text().strip() or "[续火花吧]"
         cfg["delays"]["min"] = float(self.spin_dmin.value())
         cfg["delays"]["max"] = float(self.spin_dmax.value())
@@ -1245,53 +1717,42 @@ class SparkGUI(QMainWindow):
     # ---------- 事件 ----------
 
     def _maybe_check_login_async(self):
-        """老用户升级校准：已有 config.yaml 但缺登录标记时，后台读一次本地 cookie
-        确认登录态并补写标记。检测期间徽章显示转圈"检测登录"动效。
+        """老用户升级校准：已有 config.yaml 但缺登录标记时，后台**直接读本地 cookie 库**
+        补写标记（不启动浏览器）。
+
+        为什么不再拉起浏览器：浏览器启动偶发失败时 login.launch 的分级自愈会把 profile
+        隔离成 profile.corrupt-*，登录态随之丢失——这就是"每次更新都要重新登录一次"的根因。
+        改成只读 cookie 库后，校准动作本身对登录态完全无害，且几毫秒内完成。
+
         新用户（无 config.yaml）不触发——他们本来就没登录过，直接落定未登录。
-        静默执行：失败一律忽略并按当前标记落定；若正在运行任务则跳过（避免争抢浏览器 profile）。"""
+        静默执行：探测失败一律按"未登录"落定，露出「扫码登录」按钮由用户决定。"""
         if os.path.exists(SESSION_MARK) or self._login_checking or self._running:
             self._settle_login_badge()
             return
         if not os.path.exists(CONFIG_PATH):
             self._settle_login_badge()
             return
-        try:
-            from modules import runlock
-
-            _cal_lock = runlock.acquire_lock(os.path.join(APP_DIR, "data", "run.lock"))
-        except Exception:  # noqa: BLE001
-            _cal_lock = None
-        if _cal_lock is None:
-            # 定时发送任务正在运行：绝不争抢浏览器，直接按当前标记落定
-            self._settle_login_badge()
-            return
         self._login_checking = True
-        self._start_login_spinner()
+        # 探测通常几十毫秒：延迟 350ms 才亮转圈，避免每次启动徽章闪一下
+        self.timer_spin_delay = QTimer(self)
+        self.timer_spin_delay.setSingleShot(True)
+        self.timer_spin_delay.timeout.connect(
+            lambda: self._start_login_spinner() if self._login_checking else None)
+        self.timer_spin_delay.start(350)
 
         def worker():
             try:
-                from modules.login import launch, _is_logged_in, _mark_logged_in
+                from modules import session_probe
+                from modules.login import _mark_logged_in
 
                 prof = self.cfg.get("browser", {}).get("profile_dir", "data/profile")
                 if not os.path.isabs(prof):
                     prof = os.path.join(APP_DIR, prof)
-                p, context = launch(prof, bool(self.cfg.get("browser", {}).get("gpu", True)))
-                try:
-                    if _is_logged_in(context):
-                        _mark_logged_in()
-                finally:
-                    context.close()
-                    p.stop()
-            except Exception:  # noqa: BLE001 - 静默失败：按当前标记落定，后续任务运行会自动校正
+                if session_probe.probe_saved_login(prof):
+                    _mark_logged_in()
+            except Exception:  # noqa: BLE001 - 静默失败：按当前标记落定
                 pass
             finally:
-                if _cal_lock is not None:
-                    try:
-                        from modules import runlock
-
-                        runlock.release_lock(_cal_lock)
-                    except Exception:  # noqa: BLE001
-                        pass
                 self._login_checking = False
                 self.sig_login_settle.emit()
 
@@ -1318,9 +1779,10 @@ class SparkGUI(QMainWindow):
         self._restyle(self.badge_login)
 
     def _stop_login_spinner(self):
-        t = getattr(self, "timer_spin", None)
-        if t is not None:
-            t.stop()
+        for name in ("timer_spin", "timer_spin_delay"):
+            t = getattr(self, name, None)
+            if t is not None:
+                t.stop()
 
     def _settle_login_badge(self):
         """检测结束（或无需检测）：按标记落定为已登录/未登录。"""
@@ -1348,12 +1810,13 @@ class SparkGUI(QMainWindow):
         name = self.edit_friend.text().strip()
         if not name:
             return
-        existing = [self.list_friends.item(i).text() for i in range(self.list_friends.count())]
+        existing = [self._friend_name(self.list_friends.item(i)) for i in range(self.list_friends.count())]
         if name not in existing:
-            self.list_friends.addItem(name)
+            self._add_friend_item(name)
             self.list_friends.scrollToBottom()  # 自动滚动到最新添加的好友
         self.edit_friend.clear()
         self._save_friends_now()
+        self._refresh_friend_rows()
         self._refresh_task_state()
 
     def _del_friend(self):
@@ -1361,11 +1824,12 @@ class SparkGUI(QMainWindow):
         if row >= 0:
             self.list_friends.takeItem(row)
             self._save_friends_now()
+            self._refresh_friend_rows()
             self._refresh_task_state()
 
     def _save_friends_now(self):
         """好友增删后实时写入 config.yaml（不等待保存/发送）"""
-        self.cfg["friends"] = [self.list_friends.item(i).text() for i in range(self.list_friends.count())]
+        self.cfg["friends"] = [self._friend_name(self.list_friends.item(i)) for i in range(self.list_friends.count())]
         try:
             save_config(self.cfg)
         except Exception:
@@ -1487,7 +1951,7 @@ class SparkGUI(QMainWindow):
         self.badge_task.setText("定时任务已注册" if registered else "任务未注册")
         self.badge_task.setObjectName("BadgeGreen" if registered else "BadgeRed")
         # 今日进度：实时从界面列表读取当前好友（增删后立即反映）
-        friends = [self.list_friends.item(i).text() for i in range(self.list_friends.count())]
+        friends = [self._friend_name(self.list_friends.item(i)) for i in range(self.list_friends.count())]
         done = 0
         today = datetime.date.today().isoformat()
         st_path = os.path.join(APP_DIR, "data", "state.json")

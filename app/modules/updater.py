@@ -341,9 +341,19 @@ def verify_zip(path: str) -> bool:
         return False
 
 
+# 登录态关键文件（相对 profile 目录）：Cookies 库存 sessionid，Local State 存解密密钥。
+# 两个文件缺任意一个，登录态就等于丢失 —— 更新前必须快照。
+_PROFILE_LOGIN_RELS = ("Local State", os.path.join("Default", "Network", "Cookies"))
+
+
 def backup_user_files(install_dir: str) -> "str | None":
     """应用更新前快照小型用户文件到 data/_pre_update_backup/（data 目录升级全程零接触，
-    快照可长期保留作为恢复保险）。"""
+    快照可长期保留作为恢复保险）。
+
+    除 config/state/登录标记外，额外快照**登录态关键文件**：
+    浏览器 profile 里的 Cookies 库与 Local State。升级过程中浏览器会被结束，
+    万一 Cookies 库在结束时写坏，apply 脚本会用这里的副本兜底还原，
+    避免"每次更新都要重新扫码登录一次"。"""
     import shutil
 
     bdir = os.path.join(install_dir, "data", "_pre_update_backup")
@@ -357,6 +367,15 @@ def backup_user_files(install_dir: str) -> "str | None":
         for c in candidates:
             if os.path.exists(c):
                 shutil.copy2(c, os.path.join(bdir, os.path.basename(c)))
+
+        prof = os.path.join(install_dir, "data", "profile")
+        for rel in _PROFILE_LOGIN_RELS:
+            src = os.path.join(prof, rel)
+            if not os.path.exists(src):
+                continue
+            dst = os.path.join(bdir, "profile_login", rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
         return bdir
     except Exception:  # noqa: BLE001
         return None
@@ -392,12 +411,20 @@ while ((Get-Date) -lt $deadline) {{
     if (-not $busy) {{ break }}
     Start-Sleep -Milliseconds 500
 }}
-# 2) 清理本程序残留的浏览器/驱动进程（新旧路径都匹配，不影响用户自己的 Chrome）
-Get-CimInstance Win32_Process |
-    Where-Object {{ ($_.CommandLine -like "*$app*" -or $_.CommandLine -like "*$newDir*") -and
-                    ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'headless_shell.exe' -or $_.Name -eq 'node.exe') }} |
-    ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
-Start-Sleep -Milliseconds 500
+# 2) 结束残留的浏览器/驱动进程（新旧路径都匹配，不影响用户自己的 Chrome）
+#    先给它 8 秒体面退出：直接强杀可能把 Cookies 库写坏，写坏了就得重新扫码登录。
+function Get-AppBrowsers {{
+    Get-CimInstance Win32_Process |
+        Where-Object {{ ($_.CommandLine -like "*$app*" -or $_.CommandLine -like "*$newDir*") -and
+                        ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'headless_shell.exe' -or $_.Name -eq 'node.exe') }}
+}}
+$grace = (Get-Date).AddSeconds(8)
+while ((Get-Date) -lt $grace) {{
+    if (-not (Get-AppBrowsers)) {{ break }}
+    Start-Sleep -Milliseconds 500
+}}
+Get-AppBrowsers | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+Start-Sleep -Milliseconds 800
 
 function Rollback {{
     foreach ($n in @("app.exe", "SparkAK.exe", "_internal")) {{
@@ -449,6 +476,28 @@ if ($app -ne $newDir) {{
         exit 1
     }}
 }}
+# 5.5) 登录态兜底：profile 的 Cookies 库没了就从更新前快照还原；
+#      再清掉强杀残留的单例锁（锁文件会让 Chromium 另起新 profile，
+#      表现就是"更新完要重新扫码登录一次"）。
+$profDir = Join-Path $newDir "data\\profile"
+$profBak = Join-Path $newDir "data\\_pre_update_backup\\profile_login"
+if (Test-Path $profDir) {{
+    $cookieDb = Join-Path $profDir "Default\\Network\\Cookies"
+    if (-not (Test-Path $cookieDb) -and (Test-Path $profBak)) {{
+        foreach ($rel in @("Local State", "Default\\Network\\Cookies")) {{
+            $s = Join-Path $profBak $rel
+            $d = Join-Path $profDir $rel
+            if (Test-Path $s) {{
+                New-Item -ItemType Directory -Force -Path (Split-Path $d) | Out-Null
+                Copy-Item -LiteralPath $s -Destination $d -Force -ErrorAction SilentlyContinue
+            }}
+        }}
+    }}
+    foreach ($lk in @("SingletonLock", "SingletonCookie", "SingletonSocket")) {{
+        $lp = Join-Path $profDir $lk
+        if (Test-Path $lp) {{ Remove-Item -LiteralPath $lp -Force -ErrorAction SilentlyContinue }}
+    }}
+}}
 # 6) 清理回滚点与旧目录
 foreach ($n in @("app.exe.bak", "SparkAK.exe.bak", "_internal.bak")) {{
     $bak = Join-Path $app $n
@@ -458,7 +507,10 @@ if ($app -ne $newDir) {{
     Remove-Item -LiteralPath $app -Recurse -Force -ErrorAction SilentlyContinue
 }}
 Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-if ("{'true' if restart else 'false'}" -eq "true") {{ Start-Process -FilePath (Join-Path $newDir "SparkAK.exe") }}
+if ("{'true' if restart else 'false'}" -eq "true") {{
+    Start-Sleep -Seconds 2
+    Start-Process -FilePath (Join-Path $newDir "SparkAK.exe")
+}}
 Remove-Item -LiteralPath "{q(ps_path)}" -Force -ErrorAction SilentlyContinue
 exit 0
 '''

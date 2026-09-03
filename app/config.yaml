@@ -27,6 +27,14 @@ log:
   dir: logs
   keep_days: 30
 randomize_time: false
+# 总开关（拨动开关）：关闭可暂停 1 天 / 多天 / 永久
+master:
+  enabled: true
+  pause_until: ''
+  permanent: false
+# 冻结的好友（在列表中但不发送；双击好友行切换）
+frozen_friends: []
+
 load_gate:
   enabled: true
   cpu_max: 80

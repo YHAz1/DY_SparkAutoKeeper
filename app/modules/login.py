@@ -14,9 +14,10 @@ if getattr(sys, "frozen", False):
 from playwright.sync_api import BrowserContext, sync_playwright
 
 from modules.logger import get_logger
-
 # DouYin 登录态核心 cookie（网页版登录后存在 sessionid 即视为已登录）
-_SESSION_COOKIE = "sessionid"
+# 定义与"不开浏览器的登录态探测"共用，避免两处常量各写一份
+from modules.session_probe import SESSION_COOKIE as _SESSION_COOKIE  # noqa: E402
+from modules.session_probe import probe_saved_login  # noqa: E402,F401  对外便捷导出
 
 
 def _is_logged_in(context: BrowserContext) -> bool:
@@ -48,6 +49,21 @@ def _kill_stale_browser(profile_dir: str) -> None:
         pass
 
 
+def _clear_stale_locks(profile_dir: str) -> None:
+    """清理强制结束残留的 Chromium 单例锁文件。
+
+    浏览器被强杀时 SingletonLock / SingletonCookie / SingletonSocket 会留在
+    profile 里；下次启动若读到一个"已被占用"的锁，Chromium 可能放弃原 profile
+    另起一个（表现为"明明登录过却要重新扫码"）。这里在启动前主动清掉。"""
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            p = os.path.join(profile_dir or "", name)
+            if p and os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
 # gpu=False（省资源模式）时的全套软件渲染参数：不碰显卡的任何加速路径
 _SOFTWARE_RENDER_ARGS = [
     "--disable-gpu",
@@ -63,16 +79,20 @@ def launch(profile_dir: str, gpu: bool = True) -> Tuple[object, BrowserContext]:
     固定有头模式：无头模式在部分环境下易崩溃且风控更高，已移除该选项。
     gpu=False：全套软件渲染参数，完全不碰显卡（页面渲染走 CPU，稍慢但发送任务不受影响）。
 
-    启动失败的自愈：① 清理占用 profile 的残留进程后重试；
-    ② 仍失败则把旧 profile 隔离为 profile.corrupt-时间戳（可手动找回），
-    用全新 profile 启动——避免 profile 损坏后软件永远无法登录。"""
+    启动失败的分级自愈（越往后越激进，**隔离 profile 是最后手段**）：
+      ① 清理占用 profile 的残留进程后重试；
+      ② 清理强杀残留的单例锁文件后重试（锁文件会让 Chromium 另起新 profile，
+         表现就是"更新一次就要重新扫码登录一次"）；
+      ③ 把旧 profile 隔离为 profile.corrupt-时间戳（可手动找回），用全新 profile
+         启动——避免 profile 真的损坏后软件永远无法登录。
+    隔离前会先把 cookie 库复制到 profile.corrupt-时间戳 同名目录，便于人工找回。"""
     logger = get_logger()
     args = ["--disable-blink-features=AutomationControlled"]
     if not gpu:
         args += _SOFTWARE_RENDER_ARGS
     p = sync_playwright().start()
     last_err: Exception = RuntimeError("browser launch failed")
-    for attempt in (1, 2, 3):
+    for attempt in (1, 2, 3, 4):
         try:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
@@ -87,12 +107,16 @@ def launch(profile_dir: str, gpu: bool = True) -> Tuple[object, BrowserContext]:
             logger.warning(f"浏览器启动失败（第 {attempt} 次）：{e}")
             if attempt == 1:
                 _kill_stale_browser(profile_dir)
-            elif attempt == 2 and profile_dir and os.path.isdir(profile_dir):
+            elif attempt == 2:
+                _clear_stale_locks(profile_dir)
+                time.sleep(1)
+            elif attempt == 3 and profile_dir and os.path.isdir(profile_dir):
                 quarantine = profile_dir.rstrip("/\\") + ".corrupt-" + time.strftime("%Y%m%d-%H%M%S")
                 try:
                     os.rename(profile_dir, quarantine)
                     logger.warning(
-                        f"登录配置疑似损坏，已隔离到 {quarantine}；本次将用全新配置启动，需重新扫码登录一次")
+                        f"登录配置疑似损坏，已隔离到 {quarantine}；"
+                        "本次将用全新配置启动，需重新扫码登录一次（旧登录态可从该目录找回）")
                 except OSError as re_err:
                     logger.warning(f"隔离旧 profile 失败：{re_err}")
     p.stop()
