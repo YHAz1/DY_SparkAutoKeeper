@@ -6,7 +6,7 @@
 
 基于 Playwright 的本地自动化方案 —— 每天在指定时间自动为好友续上火花，无需人工值守。
 
-[![Version](https://img.shields.io/badge/version-1.2.0-E8935A)](https://github.com/YHAz1/DY_SparkAutoKeeper/releases)
+[![Version](https://img.shields.io/badge/version-1.5.0-E8935A)](https://github.com/YHAz1/DY_SparkAutoKeeper/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)](https://github.com/YHAz1/DY_SparkAutoKeeper/releases)
 [![Engine](https://img.shields.io/badge/engine-Playwright%20·%20Chromium-2EAD33)](https://playwright.dev/python/)
 [![GUI](https://img.shields.io/badge/GUI-PyQt5-41CD52)](https://www.riverbankcomputing.com/software/pyqt/)
@@ -95,6 +95,8 @@
 > 更名为 `SparkAK/`，这些旧版本的「检查更新」会提示**「下载的更新包校验未通过」**，
 > 反复重试也无法成功（旧版校验逻辑不识别新目录名）。请直接在本页**手动下载
 > zip 覆盖升级**（步骤同上），升级到 v1.4.4+ 后即可恢复正常自更新。
+>
+> 💡 **关于升级后的登录态（v1.5.0 起）**：v1.5.0 已加入升级登录态保护，正常情况下升级不再需要重新扫码登录；但如果你当前是 **v1.4.x 或更早版本**，本次升级执行的是旧版内置的升级脚本，**可能仍需扫码登录一次**，升到 v1.5.0 之后的后续升级会自动保留登录态。
 
 > 分发包不包含 `config.yaml` 与 `data/`，因此覆盖安装不会动你的任何数据；
 > 包内附有《更新说明.txt》。若想更换目录安装，把旧目录的 `data/` 文件夹
