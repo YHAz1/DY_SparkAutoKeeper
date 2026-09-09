@@ -1955,10 +1955,12 @@ class SparkGUI(QMainWindow):
         done = 0
         today = datetime.date.today().isoformat()
         st_path = os.path.join(APP_DIR, "data", "state.json")
+        st = {}  # 必须先初始化：state.json 不存在或损坏时后面仍会引用 st（v1.5.0 新用户启动闪退根因）
         if os.path.exists(st_path):
             try:
                 with open(st_path, encoding="utf-8") as f:
-                    st = json.load(f) or {}  # state.json 是 JSON，勿用 yaml 解析
+                    loaded = json.load(f)
+                st = loaded if isinstance(loaded, dict) else {}  # state.json 是 JSON，勿用 yaml 解析
                 done = sum(1 for name in friends if (st.get(name) or "")[:10] == today)
             except Exception:
                 pass
