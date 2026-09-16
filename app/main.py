@@ -51,6 +51,15 @@ _REMIND_GRACE_SEC = 10 * 60
 # 提醒任务等待计划时间到来的上限（防止用户把提醒时间设得过早导致长时间挂起）
 _REMIND_MAX_WAIT_SEC = 60 * 60
 
+# 未到发送时间时进程内等待的上限：超过则直接退出，到点再由定时任务/开机自启触发。
+# v1.5.2 新增——此前是"一路 sleep 等到点"，导致凌晨被联网事件唤醒时要空等数小时，
+# 期间一旦系统睡眠，sleep 计时还会错乱，实测已造成整天不发。
+_MAX_EARLY_WAIT_SEC = 45 * 60
+
+# 网络等待下限（分钟）：早间从睡眠唤醒后 Wi-Fi 重连经常超过 5 分钟
+# （2026-09 日志实测：08:21 到点后等到 08:26 仍离线而放弃）。配置值更大时以配置为准。
+_MIN_NET_WAIT_MIN = 15
+
 
 def _session_mark() -> str:
     """登录确认标记文件路径（login 模块在登录成功后写入，GUI 据此显示状态）。"""
@@ -78,7 +87,7 @@ _DEFAULT_CONFIG = {
     "randomize_time": False,
     "delays": {"min": 1.0, "max": 3.0},
     "retry": {"max_attempts": 3, "interval_sec": 10},
-    "network": {"wait_timeout_min": 5},
+    "network": {"wait_timeout_min": 15},
     "load_gate": {"enabled": True, "cpu_max": 80, "gpu_max": 80, "interval_min": 5, "max_wait_min": 120},
     "notify": {
         "webhook_url": "",
@@ -218,6 +227,18 @@ def _parse_send_time(send_time: str) -> tuple:
     return 9, 0
 
 
+def _net_wait_min(cfg: dict) -> float:
+    """本次发送前等待网络就绪的分钟数（不低于 _MIN_NET_WAIT_MIN）。
+
+    早间从睡眠唤醒后 Wi-Fi 重连往往超过 5 分钟，旧默认值实测经常直接放弃，
+    造成"早上没发出、拖到白天补"。配置里填了更大值则尊重配置。"""
+    try:
+        v = float((cfg.get("network") or {}).get("wait_timeout_min", _MIN_NET_WAIT_MIN))
+    except (TypeError, ValueError):
+        v = float(_MIN_NET_WAIT_MIN)
+    return max(v, float(_MIN_NET_WAIT_MIN))
+
+
 def _run_login_phase(cfg: dict, log) -> int:
     """纯登录流程（--login，GUI「扫码登录」按钮调用）：只负责扫码登录并写登录标记，
     不触发任何发送。返回退出码：0=登录成功。"""
@@ -226,7 +247,7 @@ def _run_login_phase(cfg: dict, log) -> int:
         log.info("检测到发送任务正在运行，请稍后再点「扫码登录」")
         return 1
     try:
-        wait_min = float(cfg.get("network", {}).get("wait_timeout_min", 5))
+        wait_min = _net_wait_min(cfg)
         if not notify.wait_for_network(log, wait_min):
             log.error("网络不可用，无法登录")
             _clear_session_mark(log)
@@ -266,7 +287,7 @@ def _send_all(cfg: dict, log, only=None) -> list:
     # 负载闸门：主程序占满 CPU/显卡时先避让，降下来才启动浏览器
     loadgate.wait_for_idle(cfg, log)
 
-    wait_min = float(cfg.get("network", {}).get("wait_timeout_min", 5))
+    wait_min = _net_wait_min(cfg)
     if not notify.wait_for_network(log, wait_min):
         log.error(f"网络在 {wait_min:g} 分钟等待期内仍未恢复，本轮放弃")
         return todo
@@ -557,8 +578,10 @@ def main(mode: str = "run") -> int:
             log.info("首次使用：将打开浏览器等待扫码登录（完成后即可在面板配置好友与时间）")
             # 继续往下走"仅登录"流程
 
-        # 未到发送时间的等待逻辑只对真实发送任务生效；首次登录不受发送时间限制
-        if todo:
+        # 未到发送时间的等待逻辑只对"自动触发"生效：
+        # - 手动「立即运行一次」（mode=now）忽略时间闸门，直接发送；
+        # - 首次登录（todo 为空）不受发送时间限制。
+        if todo and mode != "now":
             send_time = str(cfg.get("send_time", "09:00"))
             hh, mm = _parse_send_time(send_time)
             now = datetime.datetime.now()
@@ -566,14 +589,26 @@ def main(mode: str = "run") -> int:
 
             if now < target:
                 wait_sec = int((target - now).total_seconds())
+                if wait_sec > _MAX_EARLY_WAIT_SEC:
+                    # 距发送时间还早（例如凌晨被联网事件唤醒）：不占用进程空等，
+                    # 直接退出，等每日定时任务/开机自启在到点后再拉起。
+                    log.info(
+                        f"当前 {now:%H:%M} 距发送时间 {send_time} 还有 {wait_sec // 60} 分钟，"
+                        f"超过本次最长等待 {_MAX_EARLY_WAIT_SEC // 60} 分钟；"
+                        f"本次退出，到点由定时任务/开机自启触发发送"
+                    )
+                    return 0
                 log.info(
                     f"还有 {len(todo)} 个好友未发送；当前 {now:%H:%M} 未到发送时间 {send_time}，"
                     f"等待 {wait_sec} 秒后发送"
                 )
-                waited = 0
-                while waited < wait_sec:
-                    time.sleep(min(30, wait_sec - waited))
-                    waited += 30
+                # 用"当前时间 vs 目标时间"判断，而不是累加 sleep 秒数：
+                # 系统睡眠期间 sleep 不按时推进，累加式会算错等待时长（v1.5.2 修复）
+                while datetime.datetime.now() < target:
+                    remaining = (target - datetime.datetime.now()).total_seconds()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(30, max(1.0, remaining)))
                     # 等待期间若今天已完成（其他实例发送了）→ 退出
                     if not [f for f in friends if state.need_send(f)]:
                         log.info("等待期间检测到今天已完成，退出")
@@ -581,6 +616,8 @@ def main(mode: str = "run") -> int:
                 log.info(f"已到发送时间 {send_time}，开始发送")
             else:
                 log.info(f"当前 {now:%H:%M} 已过发送时间 {send_time}，立即补发")
+        elif todo:
+            log.info("手动触发：忽略发送时间，立即执行")
 
         # ---- 仅登录流程（首次使用、未配置好友时）----
         if not todo:
@@ -613,6 +650,8 @@ if __name__ == "__main__":
         _mode = "login"
     elif "--remind" in _argv:
         _mode = "remind"
+    elif "--now" in _argv:
+        _mode = "now"  # 手动「立即运行一次」：忽略发送时间闸门，立即发送
     else:
         _mode = "run"
     sys.exit(main(_mode))

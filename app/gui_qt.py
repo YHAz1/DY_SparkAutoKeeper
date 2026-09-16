@@ -1923,9 +1923,10 @@ class SparkGUI(QMainWindow):
         # 开发版：conda python main.py（CREATE_NO_WINDOW 隐藏黑框）
         CREATE_NO_WINDOW = 0x08000000
         if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--run"]
+            # --now：手动触发忽略发送时间闸门，立即发送（自动触发走 --run，会按时间闸门调度）
+            cmd = [sys.executable, "--now"]
         else:
-            cmd = [get_env_python(), os.path.join(APP_DIR, "main.py")]
+            cmd = [get_env_python(), os.path.join(APP_DIR, "main.py"), "--now"]
         try:
             # 上限 60 分钟：网络等待 + 发送 + 失败重试窗口都算在内
             subprocess.run(cmd, cwd=APP_DIR, timeout=3600, creationflags=CREATE_NO_WINDOW)

@@ -10,7 +10,7 @@ retry:
   max_attempts: 3
   interval_sec: 10
 network:
-  wait_timeout_min: 5
+  wait_timeout_min: 15
 notify:
   webhook_url: ''
   remind_time: '22:30'
