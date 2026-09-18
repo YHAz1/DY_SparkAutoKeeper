@@ -13,6 +13,8 @@
 import json
 import os
 import re
+import select
+import socket
 import subprocess
 import tempfile
 import time
@@ -21,6 +23,66 @@ _CREATE_NO_WINDOW = 0x08000000
 
 # 连通性探测地址：优先探测目标站点本身，其次通用站点作联网参考
 _PROBE_URLS = ("https://www.douyin.com", "https://www.baidu.com")
+
+# TCP 直连探测目标：比 curl 快一个数量级，且能拿到具体错误码
+_PROBE_TCP = (("www.douyin.com", 443), ("www.baidu.com", 443))
+
+# socket 返回码备注（connect_ex 的"联网返回号"）
+_SOCK_ERR = {
+    0: "OK", 10013: "权限被拒", 10035: "非阻塞未完成", 10049: "地址不可用",
+    10050: "网络已断开", 10051: "网络不可达", 10052: "连接中断",
+    10054: "连接被重置", 10060: "连接超时", 10061: "连接被拒绝",
+    11001: "域名解析失败", 11004: "无此主机",
+}
+
+
+def _sock_err_name(code: int) -> str:
+    return _SOCK_ERR.get(code, f"code={code}")
+
+
+def _win_inet_state():
+    """Windows 系统联网返回号：InternetGetConnectedState(ret, flags)。
+
+    ⚠️ ret=1 只表示"存在可用连接"（网卡连着）。校园网/热点"已连接但未认证"
+    时它同样返回 1，所以**只用于日志诊断，不单独作为"能出网"的依据**。
+    返回 (ret, flags)；非 Windows 或调用失败时返回 (None, None)。"""
+    if os.name != "nt":
+        return None, None
+    try:
+        import ctypes
+        flags = ctypes.c_ulong(0)
+        ret = ctypes.WinDLL("wininet").InternetGetConnectedState(ctypes.byref(flags), 0)
+        return int(ret), int(flags.value)
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _tcp_probe(host: str, port: int = 443, timeout: float = 3.0):
+    """TCP 直连探测，返回 (ok, code)。
+
+    code 即 connect_ex 的"联网返回号"：0=连通，其余为 WSA 错误码
+    （10060 超时 / 10061 拒绝 / 11001 域名解析失败…）。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        code = s.connect_ex((host, port))
+        if code == 10035:  # WSAEWOULDBLOCK：非阻塞连接进行中，等它出真实结果
+            _, w, _ = select.select([], [s], [], timeout)
+            code = int(s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)) if w else 10060
+        s.close()
+        return code == 0, int(code)
+    except Exception:  # noqa: BLE001
+        return False, -1
+
+
+def probe_detail() -> str:
+    """本次联网探测的完整诊断串（系统返回号 + 各 TCP 返回码），只读不改状态。"""
+    ret, flags = _win_inet_state()
+    parts = [f"系统返回号 ret={ret}" + (f" flags=0x{flags:x}" if flags is not None else "")]
+    for host, port in _PROBE_TCP:
+        _, code = _tcp_probe(host, port, timeout=3.0)
+        parts.append(f"TCP {host}:{port}={code}({_sock_err_name(code)})")
+    return "；".join(parts)
 
 
 def _curl_path() -> str:
@@ -38,8 +100,26 @@ def _curl_run(args: list, timeout: int = 30):
     return r.returncode, r.stdout, r.stderr.decode("utf-8", errors="replace")
 
 
-def is_online(timeout: int = 8) -> bool:
-    """当前是否联网：任一探测地址有响应即为 True。"""
+def is_online(timeout: int = 8, log=None) -> bool:
+    """当前能否出外网：TCP 直连优先（快、带返回码），curl 兜底。
+
+    判定顺序：
+    ① TCP 连 douyin / baidu 的 443，任一 connect_ex 返回 0 → 在线；
+    ② curl 访问探测地址，任一 rc=0 → 在线（兼容 TCP 被拦但 HTTP 放行的网络）。
+
+    注意：Windows 的"已连接"标志（InternetGetConnectedState）不代表能出网
+    （校园网未认证、热点未登录时它照样为真），因此只记日志、不作通过依据。
+    """
+    for host, port in _PROBE_TCP:
+        try:
+            ok, _ = _tcp_probe(host, port, timeout=min(3.0, max(1.0, timeout / 3)))
+        except Exception:  # noqa: BLE001 - 探测本身异常不应中断判定
+            ok = False
+        if ok:
+            if log is not None:
+                ret, _f = _win_inet_state()
+                log.info(f"联网探测通过：TCP {host}:{port} 返回 0（系统返回号 ret={ret}）")
+            return True
     if not os.path.exists(_curl_path()):
         return True  # 无 curl 的异常环境不阻塞发送，交给后续流程自然报错
     for url in _PROBE_URLS:
@@ -49,21 +129,28 @@ def is_online(timeout: int = 8) -> bool:
         except Exception:  # noqa: BLE001
             rc = -1
         if rc == 0:
+            if log is not None:
+                log.info(f"联网探测通过：curl {url} rc=0")
             return True
     return False
 
 
-def wait_for_network(log=None, timeout_min: float = 5, poll_sec: int = 15) -> bool:
-    """等待网络可用（睡眠唤醒后 Wi-Fi 重连可能需要几分钟）。
+def wait_for_network(log=None, timeout_min: float = 5, poll_sec: int = 20) -> bool:
+    """等待网络可用。
 
+    睡眠唤醒后 Wi-Fi 重连、校园网"已连接→认证通过"都可能要十几分钟，
+    因此轮询间隔取 20 秒（网络一就绪立刻放行，不必等满整轮）。
     立即在线直接返回 True；否则每 poll_sec 秒探测一次，
     直到恢复（True）或超过 timeout_min 分钟（False）。"""
     timeout_min = max(0.0, float(timeout_min))
-    if is_online():
+    if is_online(log=log):  # 首次探测也记日志：写明走通的渠道与返回码，便于事后排查
         return True
+    start = time.time()
     if log is not None:
-        log.info(f"网络未连接，最多等待 {timeout_min:g} 分钟（睡眠唤醒后重连可能较慢）")
-    deadline = time.time() + timeout_min * 60
+        log.info(f"网络未就绪，最多等待 {timeout_min:g} 分钟"
+                 f"（系统显示已连接≠能出网，校园网/热点认证常需十几分钟）")
+        log.info(f"首次探测诊断：{probe_detail()}")
+    deadline = start + timeout_min * 60
     last_note = time.time()
     while True:
         remain = deadline - time.time()
@@ -72,15 +159,16 @@ def wait_for_network(log=None, timeout_min: float = 5, poll_sec: int = 15) -> bo
         time.sleep(min(poll_sec, max(1, remain)))
         if is_online():
             if log is not None:
-                log.info("网络已恢复，继续执行")
+                waited = int((time.time() - start) // 60)
+                log.info(f"网络已恢复（等待 {waited} 分钟后），继续执行")
             return True
         if log is not None and time.time() - last_note >= 60:
-            log.info("网络仍未连接，继续等待…")
+            log.info(f"网络仍未就绪，继续等待…（已等 {int((time.time() - start) // 60)} 分钟）")
             last_note = time.time()
     if is_online():
         return True
     if log is not None:
-        log.warning(f"等待 {timeout_min:g} 分钟后网络仍不可用")
+        log.warning(f"等待 {timeout_min:g} 分钟后网络仍不可用：{probe_detail()}")
     return False
 
 

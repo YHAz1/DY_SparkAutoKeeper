@@ -56,9 +56,11 @@ _REMIND_MAX_WAIT_SEC = 60 * 60
 # 期间一旦系统睡眠，sleep 计时还会错乱，实测已造成整天不发。
 _MAX_EARLY_WAIT_SEC = 45 * 60
 
-# 网络等待下限（分钟）：早间从睡眠唤醒后 Wi-Fi 重连经常超过 5 分钟
-# （2026-09 日志实测：08:21 到点后等到 08:26 仍离线而放弃）。配置值更大时以配置为准。
-_MIN_NET_WAIT_MIN = 15
+# 网络等待下限（分钟）。2026-09-18 实测定位：校园网 Wi-Fi 显示"已连接"后，
+# 真正能出外网还要 15~35 分钟（认证/就绪慢）。旧值 15 分钟导致整天漏发——
+# 09-18 12:47 启动、13:03 放弃，而网络 13:20 才真正就绪，只差 17 分钟。
+# 配置值更大时以配置为准。
+_MIN_NET_WAIT_MIN = 45
 
 
 def _session_mark() -> str:
@@ -87,7 +89,7 @@ _DEFAULT_CONFIG = {
     "randomize_time": False,
     "delays": {"min": 1.0, "max": 3.0},
     "retry": {"max_attempts": 3, "interval_sec": 10},
-    "network": {"wait_timeout_min": 15},
+    "network": {"wait_timeout_min": 45},
     "load_gate": {"enabled": True, "cpu_max": 80, "gpu_max": 80, "interval_min": 5, "max_wait_min": 120},
     "notify": {
         "webhook_url": "",
