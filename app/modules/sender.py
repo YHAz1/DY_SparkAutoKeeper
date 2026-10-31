@@ -513,19 +513,34 @@ def _send_button(page: Page):
     return None
 
 
-def _chat_window_text(page: Page, box) -> str:
-    """取聊天窗口（输入框向上取文本最多的祖先容器）的可见文本。
-    发送前后对比此文本是否变化，即可判断消息是否真的上屏。"""
+# 零宽字符家族：抖音新版输入框（Slate 编辑器，2026-10 下旬改版）"空"状态也恒含
+# U+200B，Python 的 strip() 不认它 → 不剔除的话，已清空的输入框会被永远读成
+# has-text，双信号全失效 → 每个好友重试 3 次重复发送（10-31 事故根因）
+_ZW_CHARS = "\u200b\u200c\u200d\u2060\ufeff"
+
+
+def _visible_text(v) -> str:
+    """去掉零宽字符和首尾空白后的可见文本。"""
+    if v is None:
+        return ""
+    return str(v).translate({ord(c): None for c in _ZW_CHARS}).strip()
+
+
+def _history_text(box) -> Optional[str]:
+    """取聊天历史区文本：输入框向上 12 级祖先中最长的 innerText，并剔除输入框自身文本。
+    2026-10 改版后层级变深（历史区在第 6 级往上，旧版 6 级只够到输入框自己），
+    剔除输入框自身后，打字/清空不再影响对比——发送前后此文本变化 ⇒ 消息真的上屏了。"""
     try:
         return box.evaluate(
             """e => {
                 let n = e;
                 let best = '';
-                for (let k = 0; k < 6 && n; k++, n = n.parentElement) {
+                for (let k = 0; k < 12 && n; k++, n = n.parentElement) {
                     const t = n.innerText || '';
                     if (t.length > best.length) best = t;
                 }
-                return best;
+                const self = e.innerText || '';
+                return self ? best.split(self).join('') : best;
             }"""
         )
     except Exception:  # noqa: BLE001
@@ -535,8 +550,11 @@ def _chat_window_text(page: Page, box) -> str:
 def _send_text(page: Page, text: str) -> bool:
     """在聊天输入框输入文字并发送。
     成功判断采用双信号（任一成立即成功）：
-      信号1：聊天窗口文本发生变化（消息真的上屏了——最可靠，不猜 class）；
+      信号1：聊天历史区文本变化（_history_text：剔除输入框自身，变化 ⇒ 消息真的上屏了）；
       信号2：输入框被清空或消失（发送成功后 DouYin 会清空/重建输入框）。
+    2026-10-31 加固（抖音改版致双信号全失效、每好友重复发 3 条的事故）：
+      - 新版输入框是 Slate 编辑器，"空"状态恒含零宽空格 U+200B → 判空必须剔除零宽字符；
+      - 编辑器节点可能被重建，旧元素句柄读数冻结 → 每次轮询重新定位输入框再读。
     输入采用逐字键入（press_sequentially），触发真实输入事件，适配 React 受控输入框。"""
     logger = get_logger()
     box = _chat_input(page)
@@ -544,32 +562,34 @@ def _send_text(page: Page, text: str) -> bool:
         logger.warning("未找到聊天输入框")
         return False
 
+    def read_state(b) -> str:
+        v = b.evaluate(
+            "e => (e.value !== undefined && e.value !== null) ? e.value : (e.innerText || '')"
+        )
+        return "empty" if not _visible_text(v) else "has-text"
+
     def box_state() -> str:
-        """返回输入框当前状态：'empty' / 'has-text' / 'gone'。"""
-        def read(b) -> str:
-            v = b.evaluate(
-                "e => (e.value !== undefined && e.value !== null) ? e.value : (e.innerText || '')"
-            )
-            return "empty" if not str(v).strip() else "has-text"
-
-        try:
-            return read(box)
-        except Exception:  # noqa: BLE001
-            b = _chat_input(page)
-            if b is None:
-                return "gone"
+        """返回输入框当前状态：'empty' / 'has-text' / 'gone'。
+        优先重新定位当前可见输入框（节点可能被重建，旧句柄读数冻结），失败退回原句柄。"""
+        b = _chat_input(page)
+        if b is not None:
             try:
-                return read(b)
+                return read_state(b)
             except Exception:  # noqa: BLE001
-                return "gone"
+                pass
+        try:
+            return read_state(box)
+        except Exception:  # noqa: BLE001
+            return "gone"
 
-    win_before = _chat_window_text(page, box)
+    hist_before = None
 
     def is_sent() -> Tuple[bool, str]:
         """返回 (是否成功, 信号来源)。"""
-        win_now = _chat_window_text(page, box)
-        if win_before is not None and win_now is not None and win_now != win_before:
-            return True, "聊天窗口文本变化"
+        b = _chat_input(page) or box
+        hist_now = _history_text(b)
+        if hist_before is not None and hist_now is not None and hist_now != hist_before:
+            return True, "聊天历史区文本变化"
         bs = box_state()
         if bs in ("empty", "gone"):
             return True, f"输入框{bs}"
@@ -586,6 +606,9 @@ def _send_text(page: Page, text: str) -> bool:
             logger.warning("输入后输入框仍为空，文字未进入输入框（不视为发送成功）")
             return False
         logger.info(f"已输入发送内容：{text}")
+
+        # 历史区基线：打字后、回车前取（已剔除输入框自身文本，打字本身不影响对比）
+        hist_before = _history_text(_chat_input(page) or box)
 
         # 方式1：回车发送，轮询等待成功信号（最多 5 秒）
         page.keyboard.press("Enter")
